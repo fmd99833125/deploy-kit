@@ -1,0 +1,158 @@
+# ============================================================================
+# deploy-kit · 通用发布流程（reusable workflow）
+#
+# 各项目在自己的 .github/workflows/deploy.yml 里这样调用：
+#
+#   jobs:
+#     deploy:
+#       uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@v1
+#       with:
+#         project: xuexu          # 对应服务器 projects.d/<project>.env
+#         web_dir: web            # 前端源码目录
+#         api_image: xuexu-api    # 后端镜像名；留空 = 本项目没有后端镜像
+#         api_dockerfile: deploy/Dockerfile.api
+#         image_context: .
+#       secrets: inherit
+#
+# 流程：构建前端 → 打包 → 构建镜像 → 上传 → 触发服务器原子发布
+# 服务器**不构建**，只负责取货、切换、健康检查、失败回滚。
+# ============================================================================
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: "项目标识（对应服务器 projects.d/<project>.env）"
+        required: true
+        type: string
+      web_dir:
+        description: "前端源码目录（相对仓库根）"
+        required: true
+        type: string
+      api_image:
+        description: "后端镜像名；留空表示本项目没有后端镜像"
+        required: false
+        type: string
+        default: ""
+      api_dockerfile:
+        description: "后端 Dockerfile 路径（相对仓库根）"
+        required: false
+        type: string
+        default: ""
+      image_context:
+        description: "docker build 上下文（相对仓库根）"
+        required: false
+        type: string
+        default: "."
+      node_version:
+        description: "构建前端用的 Node 版本"
+        required: false
+        type: string
+        default: "22"
+    secrets:
+      DEPLOY_HOST:
+        required: true
+        description: "服务器地址"
+      DEPLOY_PORT:
+        required: false
+        description: "SSH 端口，默认 22"
+      DEPLOY_USER:
+        required: true
+        description: "SSH 用户（该用户的 authorized_keys 里有受限入口）"
+      DEPLOY_SSH_KEY:
+        required: true
+        description: "该用户的 SSH 私钥（OpenSSH 格式）"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # ── 取代码 ────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 构建前端 ──────────────────────────────────────────────────────────
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.web_dir }}/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: ${{ inputs.web_dir }}
+        run: npm ci --no-audit --no-fund
+
+      - name: 构建前端
+        working-directory: ${{ inputs.web_dir }}
+        run: npm run build
+
+      - name: 打包前端产物
+        run: |
+          set -Eeuo pipefail
+          SRC="${{ inputs.web_dir }}/dist"
+          [ -f "$SRC/index.html" ] || { echo "❌ $SRC 里没有 index.html，前端构建没成功"; exit 1; }
+          tar -czf "$RUNNER_TEMP/web-dist.tar.gz" -C "$SRC" .
+          echo "前端产物：$(du -h "$RUNNER_TEMP/web-dist.tar.gz" | cut -f1)"
+
+      # ── 构建后端镜像 ──────────────────────────────────────────────────────
+      - name: 构建后端镜像
+        if: inputs.api_image != ''
+        run: |
+          set -Eeuo pipefail
+          docker build \
+            -f "${{ inputs.api_dockerfile }}" \
+            -t "${{ inputs.api_image }}:${{ github.sha }}" \
+            "${{ inputs.image_context }}"
+          docker save "${{ inputs.api_image }}:${{ github.sha }}" | gzip > "$RUNNER_TEMP/api-image.tar.gz"
+          echo "镜像产物：$(du -h "$RUNNER_TEMP/api-image.tar.gz" | cut -f1)"
+
+      # ── 配置 SSH ──────────────────────────────────────────────────────────
+      - name: 配置 SSH 密钥
+        run: |
+          set -Eeuo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      # ── 上传产物 ──────────────────────────────────────────────────────────
+      # 产物落地目录由服务器自己报（incoming-dir），避免 CI 和服务器各写一份路径
+      - name: 上传产物到服务器
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          PORT="${DEPLOY_PORT:-22}"
+          SSH=(ssh -i ~/.ssh/deploy_key -p "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          SCP=(scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
+
+          ARTIFACT_DIR="$("${SSH[@]}" "$TARGET" "incoming-dir ${{ inputs.project }}" | tail -1)"
+          [ -n "$ARTIFACT_DIR" ] || { echo "❌ 拿不到产物目录"; exit 1; }
+          echo "产物目录：$ARTIFACT_DIR"
+
+          "${SCP[@]}" "$RUNNER_TEMP/web-dist.tar.gz" \
+            "${TARGET}:${ARTIFACT_DIR}/${SHA}.web-dist.tar.gz"
+          if [ -f "$RUNNER_TEMP/api-image.tar.gz" ]; then
+            "${SCP[@]}" "$RUNNER_TEMP/api-image.tar.gz" \
+              "${TARGET}:${ARTIFACT_DIR}/${SHA}.api-image.tar.gz"
+          fi
+
+      # ── 触发服务器原子发布 ────────────────────────────────────────────────
+      - name: 触发发布
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+            -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" "apply ${{ inputs.project }} ${SHA}"

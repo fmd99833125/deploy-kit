@@ -407,6 +407,57 @@ assert     "  · 明确说未知项目" "grep -q '未知项目' '$ROOT7/state/pu
 # 被拒的命令绝不能碰到生产目录
 assert "被拒的命令没有动 deploy/web" "grep -q '1a2b3c4' '$ROOT7/opt/learning/repo/deploy/web/index.html'"
 
+
+# ===========================================================================
+section "T8 · 服务器端安装脚本"
+# ===========================================================================
+ROOT8="$SANDBOX_ROOT/t8"
+make_server "$ROOT8"; make_stubs "$ROOT8"
+mkdir -p "$ROOT8/srcdir/projects.d"
+cp "$SERVER_DIR/releaser.sh" "$SERVER_DIR/push-incoming.sh" "$SERVER_DIR/install-server.sh" "$ROOT8/srcdir/"
+# 沙箱版配置（路径指向沙箱）
+sed "s|^REPO_DIR=.*|REPO_DIR=$ROOT8/opt/learning/repo|; s|^DEPLOY_DIR=.*|DEPLOY_DIR=$ROOT8/opt/learning/repo/deploy|; s|^RELEASES_DIR=.*|RELEASES_DIR=$ROOT8/opt/learning/releases|; s|^ARTIFACT_DIR=.*|ARTIFACT_DIR=$ROOT8/opt/learning/incoming|" \
+  "$REAL_CONFIGS/xuexu.env" > "$ROOT8/srcdir/projects.d/xuexu.env"
+
+# 沙箱 HOME（authorized_keys 写这儿）
+mkdir -p "$ROOT8/home"
+
+run_install() {
+  local root="$1"; shift
+  KIT_DIR="$root/kit-installed" \
+  REQUIRE_ROOT=0 \
+  SSH_KEY_DIR="$root/home/.ssh" \
+  bash "$root/srcdir/install-server.sh" "$@" > "$root/state/install.log" 2>&1
+  echo $?
+}
+
+# dry-run：什么都不该落盘
+RC=$(run_install "$ROOT8" --project xuexu --dry-run)
+assert "dry-run 退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert_not "  · 没装任何文件" "[ -d '$ROOT8/kit-installed' ]"
+
+# 真装
+RC=$(run_install "$ROOT8" --project xuexu)
+assert "正式安装退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert     "  · releaser.sh 装好了" "[ -x '$ROOT8/kit-installed/releaser.sh' ]"
+assert     "  · push-incoming.sh 装好了" "[ -x '$ROOT8/kit-installed/push-incoming.sh' ]"
+assert     "  · 项目配置装好了" "[ -f '$ROOT8/kit-installed/projects.d/xuexu.env' ]"
+assert     "  · 产物目录建好了" "[ -d '$ROOT8/opt/learning/incoming' ]"
+assert     "  · 版本目录建好了" "[ -d '$ROOT8/opt/learning/releases/web' ]"
+assert     "  · 授权行带 command= 限制" "grep -q 'command=.*push-incoming.sh' '$ROOT8/home/.ssh/authorized_keys'"
+assert     "  · 授权行带 restrict" "grep -q 'restrict' '$ROOT8/home/.ssh/authorized_keys'"
+assert     "  · 私钥已生成" "[ -f '$ROOT8/home/.ssh/deploy_ci_ed25519' ]"
+assert     "  · 私钥权限 600" "[ \"\$(stat -c %a '$ROOT8/home/.ssh/deploy_ci_ed25519' 2>/dev/null || stat -f %Lp '$ROOT8/home/.ssh/deploy_ci_ed25519')\" = '600' ]"
+
+# 幂等：再装一次，authorized_keys 不该出现两条
+RC=$(run_install "$ROOT8" --project xuexu)
+N=$(grep -c 'push-incoming.sh' "$ROOT8/home/.ssh/authorized_keys" 2>/dev/null || echo 0)
+assert "重复安装幂等（授权行数 ${N}）" "[ '$N' = 1 ]"
+
+# 未知项目必须被拒
+RC=$(run_install "$ROOT8" --project nosuchproject)
+assert_not "未知项目被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
 # ===========================================================================
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ] || exit 1
