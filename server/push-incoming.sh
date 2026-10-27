@@ -59,7 +59,6 @@ if [ "$verb" = "scp" ]; then
   matched=0
   for cfg in "$PROJECTS_DIR"/*.env; do
     [ -f "$cfg" ] || continue
-    pname="$(basename "$cfg" .env)"
     # shellcheck disable=SC1090
     . "$cfg"
     dir="${ARTIFACT_DIR:-}"

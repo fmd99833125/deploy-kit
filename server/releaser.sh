@@ -233,6 +233,8 @@ cmd_status() {
   printf '  项目      : %s\n' "$PROJECT_NAME"
   printf '  当前版本  : %s\n' "$([ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo '（未发布过）')"
   printf '  可回滚目录: %s\n' "$([ -d "$WEB_OLD_DIR" ] && echo "$WEB_OLD_DIR" || echo '（无）')"
+  # 版本目录名是十六进制 sha（不含空格等特殊字符），xargs -n1 basename 是安全的
+  # shellcheck disable=SC2011
   printf '  已存版本  : %s\n' "$(ls -1dt "$RELEASES_DIR"/web/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ' || echo '（无）')"
   printf '  镜像      : %s\n' "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${API_IMAGE}:" | tr '\n' ' ' || echo '（无）')"
 }
