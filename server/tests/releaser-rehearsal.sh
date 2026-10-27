@@ -129,6 +129,13 @@ esac
 exit 0
 EOF
 
+  cat > "$bin/scp" <<'EOF'
+#!/bin/bash
+# scp 桩：只记录被调用，验证「校验通过后确实 exec 了真的 scp」
+echo "scp $*" >> "$STUB_LOG"
+exit 0
+EOF
+
   cat > "$bin/flock" <<'EOF'
 #!/bin/bash
 # macOS 没有 flock；彩排里串行执行，直接当成功
@@ -143,7 +150,7 @@ EOF
 # ---------------------------------------------------------------------------
 make_artifacts() {
   local root="$1" sha="$2"
-  local dir="$root/opt/learning/incoming/$sha"
+  local dir="$root/opt/learning/incoming"
   mkdir -p "$dir"
   # 前端产物：tar 里是 dist 的内容（index.html 在根）
   local tmp="$root/.dist"
@@ -151,10 +158,10 @@ make_artifacts() {
   echo "<html><script src=\"/assets/index-${sha}.js\"></script></html>" > "$tmp/index.html"
   echo "{\"id\":\"$sha\"}" > "$tmp/version.json"
   echo "asset-$sha" > "$tmp/assets/index-${sha}.js"
-  tar -czf "$dir/web-dist.tar.gz" -C "$tmp" .
+  tar -czf "$dir/${sha}.web-dist.tar.gz" -C "$tmp" .
   rm -rf "$tmp"
   # 后端镜像：假包 = gzip 文本，stub 从里面读 IMAGE_TAG
-  printf 'IMAGE_TAG=xuexu-api:%s\n' "$sha" | gzip > "$dir/api-image.tar.gz"
+  printf 'IMAGE_TAG=xuexu-api:%s\n' "$sha" | gzip > "$dir/${sha}.api-image.tar.gz"
 }
 
 run_releaser() {
@@ -320,6 +327,85 @@ RC=$(run_releaser "$ROOT6" rollback xuexu)
 assert "回滚退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
 assert     "  · web 换回上一版" "grep -q 'v111111' '$ROOT6/opt/learning/repo/deploy/web/index.html'"
 assert     "  · 镜像 tag 换回" "grep -qx 'xuexu-api:current' '$ROOT6/state/images'"
+
+
+# ===========================================================================
+section "T7 · 受限 SSH 入口（命令注入防护）"
+# ===========================================================================
+ROOT7="$SANDBOX_ROOT/t7"
+make_server "$ROOT7"; make_stubs "$ROOT7"
+: > "$ROOT7/state/images"; : > "$ROOT7/state/compose_ps"
+printf 'api\trunning\nworker\trunning\ncaddy\trunning\n' > "$ROOT7/state/compose_ps"
+cp "$SERVER_DIR/push-incoming.sh" "$ROOT7/kit/push-incoming.sh"
+chmod +x "$ROOT7/kit/push-incoming.sh"
+make_artifacts "$ROOT7" "1a2b3c4"
+
+run_push() {
+  local root="$1"; shift
+  SSH_ORIGINAL_COMMAND="$1" \
+  PATH="$root/bin:$PATH" \
+  STUB_LOG="$root/state/calls.log" \
+  STUB_STATE="$root/state" \
+  KIT_DIR="$root/kit" \
+  PROJECTS_DIR="$root/kit/projects.d" \
+  LOCK_DIR="$root/state" \
+  bash "$root/kit/push-incoming.sh" > "$root/state/push.log" 2>&1
+  echo $?
+}
+
+# 白名单内：apply 正常分发
+RC=$(run_push "$ROOT7" "apply xuexu 1a2b3c4")
+assert "白名单命令 apply 被接受（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert     "  · 真的发布了" "grep -q '1a2b3c4' '$ROOT7/opt/learning/repo/deploy/web/index.html'"
+
+# incoming-dir：告诉 CI 往哪推
+RC=$(run_push "$ROOT7" "incoming-dir xuexu")
+assert "incoming-dir 返回 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 打印了产物目录" "grep -q 'incoming' '$ROOT7/state/push.log'"
+
+# 注入类：全部必须被拒
+for evil in "rm -rf /" "apply xuexu; rm -rf /" "apply ../../etc abc1234" \
+            "apply xuexu ZZZZZZZ" "apply xuexu ../../../../etc/passwd" \
+            "cat /etc/shadow" "apply xuexu" "status ../../x" ""; do
+  RC=$(run_push "$ROOT7" "$evil")
+  if [ "$RC" != "0" ]; then
+    ok "拒绝危险命令：${evil:-（空）}"
+  else
+    bad "危险命令被放行了：${evil:-（空）}"
+  fi
+done
+
+
+# ── scp 上传路径校验 ───────────────────────────────────────────────────────
+ARTDIR="$ROOT7/opt/learning/incoming"
+RC=$(run_push "$ROOT7" "scp -t ${ARTDIR}/1a2b3c4.web-dist.tar.gz")
+assert "scp 到标准产物路径被接受（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert     "  · 确实 exec 了 scp" "grep -q 'scp -t' '$ROOT7/state/calls.log'"
+
+for bad_path in \
+  "scp -t ${ARTDIR}/1a2b3c4.evil.tar.gz" \
+  "scp -t ${ARTDIR}/../../etc/passwd" \
+  "scp -t /etc/passwd" \
+  "scp -t ${ARTDIR}/nothex.web-dist.tar.gz" \
+  "scp -f ${ARTDIR}/1a2b3c4.web-dist.tar.gz" \
+  "scp ${ARTDIR}/1a2b3c4.web-dist.tar.gz" \
+  "scp -t /opt/learning/repo/deploy/.env" \
+  "rsync -a ${ARTDIR}/ x:/tmp/"; do
+  RC=$(run_push "$ROOT7" "$bad_path")
+  if [ "$RC" != "0" ]; then
+    ok "拒绝非法上传：${bad_path}"
+  else
+    bad "非法上传被放行：${bad_path}"
+  fi
+done
+
+# 未知项目
+RC=$(run_push "$ROOT7" "apply nosuchproject abc1234")
+assert_not "未知项目被拒绝（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert     "  · 明确说未知项目" "grep -q '未知项目' '$ROOT7/state/push.log'"
+
+# 被拒的命令绝不能碰到生产目录
+assert "被拒的命令没有动 deploy/web" "grep -q '1a2b3c4' '$ROOT7/opt/learning/repo/deploy/web/index.html'"
 
 # ===========================================================================
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"

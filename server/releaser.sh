@@ -38,6 +38,7 @@ usage() { sed -n '2,26p' "$0"; }
 # ---------------------------------------------------------------------------
 load_project() {
   local project="$1"
+  local sha="${2:-}"
   local f="$PROJECTS_DIR/$project.env"
   [ -f "$f" ] || die "未知项目「${project}」：找不到配置 ${f}"
   # shellcheck disable=SC1090
@@ -56,7 +57,6 @@ load_project() {
 
   WEB_DIR="$DEPLOY_DIR/$WEB_SUBDIR"
   WEB_OLD_DIR="$DEPLOY_DIR/$WEB_SUBDIR.old"
-  ART_SHA_DIR="$ARTIFACT_DIR/$2"
 }
 
 # ---------------------------------------------------------------------------
@@ -97,8 +97,8 @@ health_check() {
 cmd_has() {
   local project="$1" sha="$2"
   load_project "$project" "$sha"
-  local art="$ART_SHA_DIR/web-dist.tar.gz"
-  local img="$ART_SHA_DIR/api-image.tar.gz"
+  local art="$ARTIFACT_DIR/${sha}.web-dist.tar.gz"
+  local img="$ARTIFACT_DIR/${sha}.api-image.tar.gz"
   local ok=1
   [ -f "$art" ] || { warn "缺前端产物：$art"; ok=0; }
   [ -f "$img" ] || { warn "缺后端镜像：$img"; ok=0; }
@@ -114,8 +114,8 @@ cmd_apply() {
   load_project "$project" "$sha"
   acquire_lock "$project"
 
-  local art="$ART_SHA_DIR/web-dist.tar.gz"
-  local img="$ART_SHA_DIR/api-image.tar.gz"
+  local art="$ARTIFACT_DIR/${sha}.web-dist.tar.gz"
+  local img="$ARTIFACT_DIR/${sha}.api-image.tar.gz"
   [ -f "$art" ] || die "缺前端产物：${art}（CI 还没传完？）"
   [ -f "$img" ] || die "缺后端镜像：${img}（CI 还没传完？）"
 
