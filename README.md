@@ -119,6 +119,22 @@ bash install-server.sh --project <项目名>
 **那时 pnpm 还没装** → 报 `Unable to locate executable file: pnpm` → 整个 job 挂掉，
 而报错完全看不出是「步骤顺序」的问题（npm 不会踩：node 自带 npm）。
 
+### 项目配置里的「显式写空」语义
+
+`server/projects.d/<项目>.env` 里这几个键，**写空** 和 **不写** 意思完全不同：
+
+| 键 | 不写（用默认） | 显式写空（这一步不做） |
+|---|---|---|
+| `API_IMAGE` | `<项目名>-api` | 本项目没有后端镜像（纯前端站） |
+| `APP_SERVICES` | `api worker` | 不按「换镜像重建业务容器」这一步走 |
+| `WEB_SERVICES` | `caddy` | 不按「换前端重建 web 容器」这一步走 |
+| `HEALTH_SERVICES` | `api worker caddy` | 健康检查不看任何服务 |
+
+> 为什么要有「显式写空」：有些项目前端也由 api 自己托管（同域挂 `web/dist`），
+> 只需要换前端时重建它**一次** → `APP_SERVICES=` 写空、`WEB_SERVICES=api`。
+> ⚠️ 实现上必须用 `${VAR-默认}` 而不是 `${VAR:-默认}` —— 后者会把空串也吃掉、回退成默认值，
+> 于是去重建本项目根本没有的服务（日志刷 `no such service: xxx`）。
+
 ### 生成的 workflow 长这样
 
 ```yaml
@@ -243,7 +259,7 @@ bash server/tests/releaser-rehearsal.sh
 正常发布、产物缺失、健康检查失败自动回滚、幂等、保留策略、手动回滚、
 **命令注入/路径穿越防护**、安装脚本、
 **多项目接入与隔离**（T9：脚手架生成、纯前端项目、两个项目互不干涉、跨项目越权被拒）。
-共 **141 条断言**。
+共 **147 条断言**。
 
 > ⚠️ 2026-10-28 踩坑：workflow 里同一个 step 写了两条 `if`，GitHub 判
 > `Invalid workflow file ... 'if' is already defined` —— 而 Python 的 `yaml.safe_load`

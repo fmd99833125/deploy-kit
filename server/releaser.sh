@@ -54,12 +54,20 @@ load_project() {
   #    配置里**显式写空**（API_IMAGE=）= 本项目没有后端镜像（纯前端站），
   #    配置里**完全不写** = 用默认名 <项目名>-api。
   API_IMAGE="${API_IMAGE-$PROJECT_NAME-api}"
+  # ⚠️ 下面三个服务列表也用 `-` 不是 `:-`，理由同 API_IMAGE：
+  #    配置里**显式写空**（APP_SERVICES=）= 这一步**不做**；
+  #    配置里**完全不写** = 用默认值。
+  #    为什么需要「显式写空」：有些项目前端也由 api 自己托管
+  #    （同域挂 web/dist），只需要换前端时重建它**一次**，
+  #    这时 APP_SERVICES= 写空、WEB_SERVICES=api。
+  #    ❌ 用 `:-` 的话空串会回退成默认值 → 跑去重建本项目根本没有的服务
+  #    → 日志里刷「no such service: worker」（不阻断发布，但会让人以为坏了）。
   # 换镜像后要重建的服务（跑业务代码的容器）
-  APP_SERVICES="${APP_SERVICES:-api worker}"
+  APP_SERVICES="${APP_SERVICES-api worker}"
   # 换前端后要重建的服务（bind mount 绑着 web 目录，必须重建才重新解析 inode）
-  WEB_SERVICES="${WEB_SERVICES:-caddy}"
+  WEB_SERVICES="${WEB_SERVICES-caddy}"
   # 健康检查看哪些服务
-  HEALTH_SERVICES="${HEALTH_SERVICES:-api worker caddy}"
+  HEALTH_SERVICES="${HEALTH_SERVICES-api worker caddy}"
   KEEP_RELEASES="${KEEP_RELEASES:-3}"
   STATE_FILE="$RELEASES_DIR/.current"
 

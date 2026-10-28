@@ -815,5 +815,57 @@ RC=$(run_push "$ROOT9" "status kids")
 assert_not "未绑定项目时拒绝查状态（实际 ${RC}）" "[ '$RC' = 0 ]"
 
 # ===========================================================================
+section "T10 · 服务列表的「显式留空」语义"
+# ===========================================================================
+# ⚠️ 2026-10-28 实测（kids 首次发布时在本地端到端彩排里看到）：
+#    kids 的注册表写的是 APP_SERVICES=""（前端由 api 自己托管 → 只重建一次）
+#    但 releaser 里那三个服务列表用的是 `:-` → 空串会**回退成默认值**
+#    → 实际执行了 `docker compose up -d --force-recreate api worker`
+#    → 日志刷「no such service: worker」（kids 没有 worker 服务）。
+#    不阻断发布（那步有 || true），但会让人以为发布坏了。
+#    修法：跟 API_IMAGE 一样用 `-`（不是 `:-`）→ 显式写空 = 这一步不做。
+ROOT10="$SANDBOX_ROOT/t10"
+make_server "$ROOT10"; make_stubs "$ROOT10"
+: > "$ROOT10/state/images"; : > "$ROOT10/state/compose_calls"
+printf 'api\trunning\ncaddy\trunning\n' > "$ROOT10/state/compose_ps"
+make_artifacts "$ROOT10" "feed111"
+
+# 模拟 kids 的配置：APP_SERVICES 显式留空，WEB_SERVICES=api
+cat > "$ROOT10/kit/projects.d/xuexu.env" <<EOF
+PROJECT_NAME=xuexu
+REPO_DIR=$ROOT10/opt/learning/repo
+DEPLOY_DIR=$ROOT10/opt/learning/repo/deploy
+RELEASES_DIR=$ROOT10/opt/learning/releases
+ARTIFACT_DIR=$ROOT10/opt/learning/incoming
+WEB_SUBDIR=web
+API_IMAGE=xuexu-api
+APP_SERVICES=
+WEB_SERVICES=api
+HEALTH_SERVICES=api
+KEEP_RELEASES=3
+EOF
+
+RC=$(run_releaser "$ROOT10" apply xuexu feed111)
+assert "退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · compose 调用里没有 'api worker'（APP_SERVICES 显式留空 → 跳过这一步）" \
+  "! grep -q 'api worker' '$ROOT10/state/compose_calls'"
+assert "  · 但仍然按 WEB_SERVICES 重建了 api" \
+  "grep -q 'force-recreate api' '$ROOT10/state/compose_calls'"
+assert "  · 健康检查只看 HEALTH_SERVICES 里的 api（不是默认三件套）" \
+  "! grep -q 'worker' '$ROOT10/state/out.log'"
+
+# 反向：完全不写这三个键 → 仍然用默认值
+ROOT10B="$SANDBOX_ROOT/t10b"
+make_server "$ROOT10B"; make_stubs "$ROOT10B"
+: > "$ROOT10B/state/images"; : > "$ROOT10B/state/compose_calls"
+printf 'api\trunning\nworker\trunning\ncaddy\trunning\n' > "$ROOT10B/state/compose_ps"
+make_artifacts "$ROOT10B" "beef222"
+grep -vE '^(APP_SERVICES|WEB_SERVICES|HEALTH_SERVICES)=' "$ROOT10B/kit/projects.d/xuexu.env" \
+  > "$ROOT10B/kit/projects.d/xuexu.env.tmp" && mv "$ROOT10B/kit/projects.d/xuexu.env.tmp" "$ROOT10B/kit/projects.d/xuexu.env"
+RC=$(run_releaser "$ROOT10B" apply xuexu beef222)
+assert "完全不写服务列表 → 仍用默认值 api worker（退出码 0，实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 默认重建了 api worker" "grep -q 'force-recreate api worker' '$ROOT10B/state/compose_calls'"
+
+# ===========================================================================
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ] || exit 1
