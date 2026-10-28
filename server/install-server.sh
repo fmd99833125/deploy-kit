@@ -89,17 +89,39 @@ install -d -m 700 "$KEYDIR"
 touch "$KEYDIR/authorized_keys"
 chmod 600 "$KEYDIR/authorized_keys"
 
+# 授权行的前缀（含项目名）—— 后面两处比对都用它
+AUTH_PREFIX="command=\"${KIT_DIR}/push-incoming.sh --project ${PROJECT}\",restrict "
+
 if [ -n "$CI_PUBKEY" ]; then
   [ -f "$CI_PUBKEY" ] || die "公钥文件不存在：${CI_PUBKEY}"
   PUBKEY="$(cat "$CI_PUBKEY")"
   PRIVATE_HINT="（用你自己已有的私钥，不要贴到聊天里）"
 else
-  KEYFILE="$KEYDIR/deploy_ci_ed25519"
-  if [ ! -f "$KEYFILE" ]; then
-    log "生成 CI 专用密钥对"
-    ssh-keygen -t ed25519 -N '' -C "github-actions-${PROJECT}" -f "$KEYFILE"
-  else
-    log "复用已存在的密钥：${KEYFILE}"
+  # ⚠️ 钥匙必须【按项目分】，不能共用：
+  #    ① 同一把公钥不能当两个项目的 deploy key；
+  #    ② OpenSSH 只认 authorized_keys 里【第一条】匹配公钥的授权行 →
+  #       两个项目共用一把钥匙 = 第二个项目的授权行永远不生效，
+  #       而脚本还会「看着成功」地退出 0（静默失效，最难查的一类）。
+  #    迁移友好：如果这台机器上已经有【本项目】的授权行，就沿用那把钥匙 ——
+  #    否则老项目的 GitHub Secret 跟着要改（等于逼人重配一遍 CI）。
+  KEYFILE=""
+  for cand in "$KEYDIR"/deploy_ci_*.pub "$KEYDIR"/deploy_ci.pub; do
+    [ -f "$cand" ] || continue
+    cand_pub="$(cat "$cand")"
+    if grep -qF "${AUTH_PREFIX}${cand_pub}" "$KEYDIR/authorized_keys" 2>/dev/null; then
+      KEYFILE="${cand%.pub}"
+      log "沿用已授权给本项目的既有密钥：${KEYFILE}"
+      break
+    fi
+  done
+  if [ -z "$KEYFILE" ]; then
+    KEYFILE="$KEYDIR/deploy_ci_${PROJECT}_ed25519"
+    if [ ! -f "$KEYFILE" ]; then
+      log "生成 CI 专用密钥对（项目 ${PROJECT}）"
+      ssh-keygen -t ed25519 -N '' -C "github-actions-${PROJECT}" -f "$KEYFILE"
+    else
+      log "复用已存在的密钥：${KEYFILE}"
+    fi
   fi
   chmod 600 "$KEYFILE"
   PUBKEY="$(cat "${KEYFILE}.pub")"
@@ -110,9 +132,11 @@ fi
 # restrict 禁掉 pty / 端口转发 / agent 转发
 # ⚠️ 必须带 --project <名>：这把密钥只授权这一个项目，
 #    否则 kids 的 CI 密钥能往 xuexu 的产物目录里塞文件、也能触发 xuexu 发布。
-AUTH_LINE="command=\"${KIT_DIR}/push-incoming.sh --project ${PROJECT}\",restrict ${PUBKEY}"
-if grep -qF "$PUBKEY" "$KEYDIR/authorized_keys"; then
-  log "authorized_keys 里已有这把公钥，跳过"
+# ⚠️ 比对的是【整条授权行】而不是公钥：同一把公钥配不同的 command= 是两条不同的授权，
+#    只比公钥会把「本项目该加的那条」误判成「已经有了」→ 静默不写。
+AUTH_LINE="${AUTH_PREFIX}${PUBKEY}"
+if grep -qF "$AUTH_LINE" "$KEYDIR/authorized_keys"; then
+  log "authorized_keys 里已有这条授权，跳过"
 else
   printf '%s\n' "$AUTH_LINE" >> "$KEYDIR/authorized_keys"
   log "已写入 authorized_keys"

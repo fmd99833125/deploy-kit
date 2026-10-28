@@ -451,13 +451,74 @@ assert     "  · 版本目录建好了" "[ -d '$ROOT8/opt/learning/releases/web'
 assert     "  · 授权行带 command= 限制" "grep -q 'command=.*push-incoming.sh' '$ROOT8/home/.ssh/authorized_keys'"
 assert     "  · 授权行带 restrict" "grep -q 'restrict' '$ROOT8/home/.ssh/authorized_keys'"
 assert     "  · 授权行绑定了项目（这把钥匙只授权这一个项目）" "grep -q 'push-incoming.sh --project xuexu' '$ROOT8/home/.ssh/authorized_keys'"
-assert     "  · 私钥已生成" "[ -f '$ROOT8/home/.ssh/deploy_ci_ed25519' ]"
-assert     "  · 私钥权限 600" "[ \"\$(stat -c %a '$ROOT8/home/.ssh/deploy_ci_ed25519' 2>/dev/null || stat -f %Lp '$ROOT8/home/.ssh/deploy_ci_ed25519')\" = '600' ]"
+# ⚠️ 钥匙文件【按项目分】：deploy_ci_<项目>_ed25519
+#    （共用一把钥匙 = 第二个项目的授权行永远不生效，且脚本还退出 0 看着成功）
+assert     "  · 私钥已生成（按项目分名）" "[ -f '$ROOT8/home/.ssh/deploy_ci_xuexu_ed25519' ]"
+assert     "  · 私钥权限 600" "[ \"\$(stat -c %a '$ROOT8/home/.ssh/deploy_ci_xuexu_ed25519' 2>/dev/null || stat -f %Lp '$ROOT8/home/.ssh/deploy_ci_xuexu_ed25519')\" = '600' ]"
 
 # 幂等：再装一次，authorized_keys 不该出现两条
 RC=$(run_install "$ROOT8" --project xuexu)
 N=$(grep -c 'push-incoming.sh' "$ROOT8/home/.ssh/authorized_keys" 2>/dev/null || echo 0)
 assert "重复安装幂等（授权行数 ${N}）" "[ '$N' = 1 ]"
+
+# ── 装第二个项目：必须【另一把钥匙 + 另一条授权行】─────────────────────────
+# ⚠️ 2026-10-28 实测出的 bug（已在生产形态复现）：
+#    原来钥匙文件名写死 deploy_ci_ed25519（不带项目名）→ 装第二个项目时**复用同一把私钥**；
+#    而「已存在」的判断只比【公钥】不比对【整条授权行】→ kids 的授权行根本没写进去，
+#    **而脚本退出码还是 0**（静默失效）→ kids 的 CI 实际被绑在 xuexu 上：
+#    OpenSSH 只认第一条匹配公钥的授权行 → kids 能操作 xuexu（横向越权），且自己永远发不了。
+mkdir -p "$ROOT8/srcdir/projects.d"
+sed "s|^REPO_DIR=.*|REPO_DIR=$ROOT8/opt/kids/repo|; s|^DEPLOY_DIR=.*|DEPLOY_DIR=$ROOT8/opt/kids/repo/deploy|; \
+     s|^RELEASES_DIR=.*|RELEASES_DIR=$ROOT8/opt/kids/releases|; s|^ARTIFACT_DIR=.*|ARTIFACT_DIR=$ROOT8/opt/kids/incoming|" \
+  "$REAL_CONFIGS/kids.env" > "$ROOT8/srcdir/projects.d/kids.env"
+
+RC=$(run_install "$ROOT8" --project kids)
+assert "装第二个项目退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · authorized_keys 有 2 条授权行" \
+  "[ \$(grep -c 'push-incoming.sh' '$ROOT8/home/.ssh/authorized_keys' 2>/dev/null || echo 0) = 2 ]"
+assert "  · kids 的授权行绑定了 kids" \
+  "grep -q 'push-incoming.sh --project kids' '$ROOT8/home/.ssh/authorized_keys'"
+assert "  · xuexu 的授权行还在" \
+  "grep -q 'push-incoming.sh --project xuexu' '$ROOT8/home/.ssh/authorized_keys'"
+assert "  · 两个项目用的是【不同的钥匙】" \
+  "[ \"\$(cat '$ROOT8/home/.ssh/deploy_ci_xuexu_ed25519.pub')\" != \"\$(cat '$ROOT8/home/.ssh/deploy_ci_kids_ed25519.pub')\" ]"
+assert "  · kids 私钥权限 600" \
+  "[ \"\$(stat -c %a '$ROOT8/home/.ssh/deploy_ci_kids_ed25519' 2>/dev/null || stat -f %Lp '$ROOT8/home/.ssh/deploy_ci_kids_ed25519')\" = '600' ]"
+
+# 负向测试：kids 的钥匙（绑定 --project kids）不许碰 xuexu
+RC=$(SSH_ORIGINAL_COMMAND="apply xuexu 1a2b3c4" \
+     PATH="$ROOT8/bin:$PATH" STUB_LOG="$ROOT8/state/calls.log" STUB_STATE="$ROOT8/state" \
+     KIT_DIR="$ROOT8/kit-installed" PROJECTS_DIR="$ROOT8/kit-installed/projects.d" \
+     LOCK_DIR="$ROOT8/state" \
+     bash "$ROOT8/kit-installed/push-incoming.sh" --project kids > "$ROOT8/state/push.log" 2>&1; echo $?)
+assert_not "kids 的钥匙不能发布 xuexu（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 拒绝原因写清了是项目越权" \
+  "grep -qE '无权操作|只授权了项目' '$ROOT8/state/push.log'"
+
+# ── 迁移友好：老机器上已有「无项目名」的旧钥匙 + 旧授权行 → 沿用它 ────────
+# 现场：xuexu 当初装的是 deploy_ci_ed25519（没有项目名）。改了命名规则之后
+# 再装一次 xuexu，**不能换钥匙** —— 换了 GitHub Secret 就失效，等于逼人重配 CI。
+ROOT8M="$SANDBOX_ROOT/t8m"
+make_server "$ROOT8M"; make_stubs "$ROOT8M"
+mkdir -p "$ROOT8M/srcdir/projects.d" "$ROOT8M/home/.ssh"
+cp "$SERVER_DIR/releaser.sh" "$SERVER_DIR/push-incoming.sh" "$SERVER_DIR/install-server.sh" "$ROOT8M/srcdir/"
+sed "s|^REPO_DIR=.*|REPO_DIR=$ROOT8M/opt/learning/repo|; s|^DEPLOY_DIR=.*|DEPLOY_DIR=$ROOT8M/opt/learning/repo/deploy|; \
+     s|^RELEASES_DIR=.*|RELEASES_DIR=$ROOT8M/opt/learning/releases|; s|^ARTIFACT_DIR=.*|ARTIFACT_DIR=$ROOT8M/opt/learning/incoming|" \
+  "$REAL_CONFIGS/xuexu.env" > "$ROOT8M/srcdir/projects.d/xuexu.env"
+ssh-keygen -q -t ed25519 -N '' -C 'github-actions-xuexu' -f "$ROOT8M/home/.ssh/deploy_ci_ed25519"
+printf 'command="%s/push-incoming.sh --project xuexu",restrict %s\n' \
+  "$ROOT8M/kit-installed" "$(cat "$ROOT8M/home/.ssh/deploy_ci_ed25519.pub")" \
+  > "$ROOT8M/home/.ssh/authorized_keys"
+chmod 600 "$ROOT8M/home/.ssh/authorized_keys"
+RC=$(KIT_DIR="$ROOT8M/kit-installed" REQUIRE_ROOT=0 SSH_KEY_DIR="$ROOT8M/home/.ssh" \
+     bash "$ROOT8M/srcdir/install-server.sh" --project xuexu > "$ROOT8M/state/install.log" 2>&1; echo $?)
+assert "老机器重装退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 沿用了旧钥匙（没生成新文件）" \
+  "[ ! -f '$ROOT8M/home/.ssh/deploy_ci_xuexu_ed25519' ]"
+assert "  · 旧私钥还在原处" "[ -f '$ROOT8M/home/.ssh/deploy_ci_ed25519' ]"
+assert "  · 授权行还是 1 条（没重复写）" \
+  "[ \$(grep -c 'push-incoming.sh' '$ROOT8M/home/.ssh/authorized_keys' 2>/dev/null || echo 0) = 1 ]"
+
 
 # 未知项目必须被拒
 RC=$(run_install "$ROOT8" --project nosuchproject)

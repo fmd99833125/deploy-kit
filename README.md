@@ -82,10 +82,19 @@ bash install-server.sh --project <项目名>
 它会：
 - 把 `releaser.sh` / `push-incoming.sh` / 项目配置装到 `/opt/deploy-kit`
 - 建好 `incoming/`（产物落地）和 `releases/web/`（版本留存）
-- 生成一把 CI 专用 SSH 密钥，写进 `/root/.ssh/authorized_keys`，
+- 生成一把**本项目专属**的 CI 密钥 `/root/.ssh/deploy_ci_<项目名>_ed25519`，
+  写进 `/root/.ssh/authorized_keys`，
   带 `command="/opt/deploy-kit/push-incoming.sh --project <项目名>",restrict` 限制
 
 先看它要做什么：`bash install-server.sh --project <项目名> --dry-run`
+
+> ⚠️ **钥匙必须按项目分**（`deploy_ci_<项目名>_ed25519`）：
+> ① 同一把公钥不能当两个项目的 deploy key；
+> ② OpenSSH 只认 `authorized_keys` 里**第一条**匹配公钥的授权行 →
+> 两个项目共用一把钥匙，**第二个项目的授权行永远不生效**，
+> 而安装脚本还会「看着成功」地退出 0（最难查的一类静默失效）。
+> 所以：**装第二个项目时它会给新项目生成新钥匙**；重装同一个项目时它会
+> **沿用那把已授权的旧钥匙**（不换密钥 → 你的 GitHub Secret 不用改）。
 
 ### ③ GitHub Secrets（仓库级）
 
@@ -222,7 +231,7 @@ bash server/tests/releaser-rehearsal.sh
 正常发布、产物缺失、健康检查失败自动回滚、幂等、保留策略、手动回滚、
 **命令注入/路径穿越防护**、安装脚本、
 **多项目接入与隔离**（T9：脚手架生成、纯前端项目、两个项目互不干涉、跨项目越权被拒）。
-共 **126 条断言**。
+共 **138 条断言**。
 
 > ⚠️ 2026-10-28 踩坑：workflow 里同一个 step 写了两条 `if`，GitHub 判
 > `Invalid workflow file ... 'if' is already defined` —— 而 Python 的 `yaml.safe_load`
