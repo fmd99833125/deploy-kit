@@ -55,6 +55,11 @@ on:
         required: false
         type: string
         default: ""
+      package_manager:
+        description: "前端包管理器：npm / pnpm / yarn（决定装依赖的命令和锁文件路径）"
+        required: false
+        type: string
+        default: "npm"
     secrets:
       DEPLOY_HOST:
         required: true
@@ -114,13 +119,59 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
-          cache-dependency-path: ${{ inputs.web_dir }}/package-lock.json
+          cache: ${{ inputs.package_manager == 'npm' && 'npm' || inputs.package_manager }}
+          cache-dependency-path: ${{ inputs.package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.web_dir) || inputs.package_manager == 'yarn' && format('{0}/yarn.lock', inputs.web_dir) || format('{0}/package-lock.json', inputs.web_dir) }}
+
+      # ⚠️ 先查锁文件在不在 —— 少了它，setup-node 的缓存步骤会报一句
+      #    莫名其妙的错，看不出是「这个项目根本没提交锁文件」。
+      - name: 检查锁文件
+        if: steps.check.outputs.should_deploy == 'true'
+        run: |
+          set -Eeuo pipefail
+          case "${{ inputs.package_manager }}" in
+            npm)  LOCK="${{ inputs.web_dir }}/package-lock.json" ;;
+            pnpm) LOCK="${{ inputs.web_dir }}/pnpm-lock.yaml" ;;
+            yarn) LOCK="${{ inputs.web_dir }}/yarn.lock" ;;
+            *) echo "❌ 不支持的包管理器：${{ inputs.package_manager }}（只支持 npm / pnpm / yarn）"; exit 1 ;;
+          esac
+          [ -f "$LOCK" ] || { echo "❌ 找不到锁文件 $LOCK —— ${{ inputs.package_manager }} 装不了依赖"; exit 1; }
+          echo "锁文件：$LOCK"
+
+      # pnpm 的大版本跟 lockfileVersion 一一对应（v5.4→pnpm7 / v6.0→pnpm8 / v9.0→pnpm9）。
+      # 用项目自己的锁文件推断版本 —— 不在 workflow 里另配一份，免得和项目脱节。
+      - name: 读 pnpm 版本
+        if: steps.check.outputs.should_deploy == 'true' && inputs.package_manager == 'pnpm'
+        id: pnpmver
+        run: |
+          set -Eeuo pipefail
+          LOCK="${{ inputs.web_dir }}/pnpm-lock.yaml"
+          MAJOR="$(head -1 "$LOCK" | grep -oE '[0-9]+' | head -1)"
+          case "$MAJOR" in
+            5) VER=7 ;;
+            6) VER=8 ;;
+            9) VER=9 ;;
+            *) echo "❌ 认不出的 lockfileVersion：$MAJOR（$LOCK）"; exit 1 ;;
+          esac
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "pnpm $VER（lockfileVersion $MAJOR）"
+
+      - name: 安装 pnpm
+        if: steps.check.outputs.should_deploy == 'true' && inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pnpmver.outputs.version }}
 
       - name: 安装前端依赖
         if: steps.check.outputs.should_deploy == 'true'
         working-directory: ${{ inputs.web_dir }}
-        run: npm ci --no-audit --no-fund
+        run: |
+          set -Eeuo pipefail
+          case "${{ inputs.package_manager }}" in
+            npm)  npm ci --no-audit --no-fund ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            *) echo "❌ 不支持的包管理器：${{ inputs.package_manager }}"; exit 1 ;;
+          esac
 
       - name: 构建前端
         if: steps.check.outputs.should_deploy == 'true'

@@ -544,6 +544,31 @@ else
   printf '  \033[1;33m⚠️ \033[0m 没有 python3，跳过 workflow YAML 校验\n'
 fi
 
+# ── ④之二 包管理器：默认 npm、可指定 pnpm、非法值被拒 ────────────────────
+assert "  · 默认包管理器是 npm" "grep -q 'package_manager: npm' '$ROOT9/project-repo/.github/workflows/deploy.yml'"
+assert "  · 引用的是 v2（v1 没有 package_manager 输入，用了会报 Invalid input）" \
+  "grep -q 'deploy-kit/.github/workflows/deploy.yml@v2' '$ROOT9/project-repo/.github/workflows/deploy.yml'"
+RC=$(run_new_project "$ROOT9" --name pnpmproj --project-repo "$ROOT9/project-repo3" --package-manager pnpm)
+assert "  · --package-manager pnpm 能生成（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 生成的 workflow 里是 pnpm" "grep -q 'package_manager: pnpm' '$ROOT9/project-repo3/.github/workflows/deploy.yml'"
+RC=$(run_new_project "$ROOT9" --name badpm --project-repo "$ROOT9/project-repo4" --package-manager yarn2)
+assert_not "  · 非法包管理器被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+# ── ④之三 reusable workflow 本身：合法 + 有 package_manager 输入 ──────────
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c "
+import yaml
+d=yaml.safe_load(open('.github/workflows/deploy.yml'))
+inp=d[True]['workflow_call']['inputs']
+assert 'package_manager' in inp, list(inp)
+assert inp['package_manager']['default']=='npm', inp['package_manager']
+"; then
+    ok "reusable workflow 合法，且有 package_manager 输入（默认 npm）"
+  else
+    bad "reusable workflow 缺 package_manager 输入"
+  fi
+fi
+
 # ── ⑤ 拒绝覆盖 / 拒绝非法名 ──────────────────────────────────────────────
 RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo")
 assert_not "重复生成被拒（无 --force，实际 ${RC}）" "[ '$RC' = 0 ]"

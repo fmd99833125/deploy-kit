@@ -33,6 +33,11 @@ NO_API=0
 API_DOCKERFILE="deploy/Dockerfile.api"
 IMAGE_CONTEXT="."
 NODE_VERSION="22"
+PACKAGE_MANAGER="npm"
+# 引用 deploy-kit 的哪个 tag：
+#   v1 = 只有 npm 支持（xuexu 用的就是这个）
+#   v2 = 加了 package_manager（npm / pnpm / yarn）—— **新项目一律用 v2**
+WORKFLOW_REF="v2"
 SKIP_PATHS='^(docs/|.*\.md$)'
 DEPLOY_ROOT=""
 HEALTH_SERVICES="api worker caddy"
@@ -55,6 +60,8 @@ while [ $# -gt 0 ]; do
     --api-dockerfile)   API_DOCKERFILE="${2:-}"; shift 2 ;;
     --image-context)    IMAGE_CONTEXT="${2:-}"; shift 2 ;;
     --node-version)     NODE_VERSION="${2:-}"; shift 2 ;;
+    --package-manager)  PACKAGE_MANAGER="${2:-}"; shift 2 ;;
+    --workflow-ref)     WORKFLOW_REF="${2:-}"; shift 2 ;;
     --skip-paths)       SKIP_PATHS="${2:-}"; shift 2 ;;
     --deploy-root)      DEPLOY_ROOT="${2:-}"; shift 2 ;;
     --health-services)  HEALTH_SERVICES="${2:-}"; shift 2 ;;
@@ -69,6 +76,10 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$NAME" ] || die "必须给 --name <项目名>"
+case "$PACKAGE_MANAGER" in
+  npm|pnpm|yarn) ;;
+  *) die "不支持的包管理器：${PACKAGE_MANAGER}（只支持 npm / pnpm / yarn）" ;;
+esac
 # 项目名会进目录名、锁文件名、容器名，必须严格
 case "$NAME" in
   *[!a-z0-9-]*) die "项目名只能用小写字母、数字、连字符（收到：${NAME}）" ;;
@@ -147,6 +158,7 @@ if [ -n "$WORKFLOW_FILE" ]; then
     WITH_BLOCK="      project: ${NAME}
       web_dir: ${WEB_DIR}
       node_version: \"${NODE_VERSION}\"
+      package_manager: ${PACKAGE_MANAGER}
       skip_paths: '${SKIP_PATHS}'"
   else
     WITH_BLOCK="      project: ${NAME}
@@ -155,6 +167,7 @@ if [ -n "$WORKFLOW_FILE" ]; then
       api_dockerfile: ${API_DOCKERFILE}
       image_context: ${IMAGE_CONTEXT}
       node_version: \"${NODE_VERSION}\"
+      package_manager: ${PACKAGE_MANAGER}
       skip_paths: '${SKIP_PATHS}'"
   fi
 
@@ -176,7 +189,7 @@ on:
 
 jobs:
   deploy:
-    uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@v1
+    uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@${WORKFLOW_REF}
     with:
 ${WITH_BLOCK}
     secrets: inherit

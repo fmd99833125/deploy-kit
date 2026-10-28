@@ -61,6 +61,8 @@ bash server/new-project.sh --name <项目名> \
 | `--app-services api` | 换镜像后重建哪些容器 |
 | `--web-services caddy` | 换前端后重建哪些容器 |
 | `--deploy-root /opt/<项目名>` | 服务器上的部署根目录 |
+| `--package-manager npm\|pnpm\|yarn` | 前端包管理器（默认 npm） |
+| `--workflow-ref v2` | 引用 deploy-kit 的哪个 tag（默认 v2） |
 | `--dry-run` | 只看要生成什么，不落盘 |
 
 > 多词的值（`--health-services "api caddy"`）生成时会**自动加引号** ——
@@ -101,7 +103,7 @@ bash install-server.sh --project <项目名>
 ```yaml
 jobs:
   deploy:
-    uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@v1
+    uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@v2
     with:
       project: <项目名>            # 对应服务器 projects.d/<项目名>.env
       web_dir: web                # 前端源码目录
@@ -109,9 +111,26 @@ jobs:
       api_dockerfile: deploy/Dockerfile.api
       image_context: .
       node_version: "22"
+      package_manager: npm        # npm / pnpm / yarn
       skip_paths: '^(docs/|.*\.md$)'   # 只改文档时不发布
     secrets: inherit
 ```
+
+> ⚠️ **用 `@v2`**：`v1` 只支持 npm，`v2` 才带 `package_manager` 输入
+> （用 v1 又传 `package_manager` 会报 `Invalid input, package_manager is not defined`）。
+> xuexu 目前还钉在 `@v1`（它用 npm，两版对它是等价的），升版见
+> [`docs/未完成工作清单.md`](./docs/未完成工作清单.md)。
+
+### 包管理器
+
+| 值 | 装依赖 | 锁文件 | 备注 |
+|---|---|---|---|
+| `npm`（默认） | `npm ci` | `package-lock.json` | |
+| `pnpm` | `pnpm install --frozen-lockfile` | `pnpm-lock.yaml` | **CI 里的 pnpm 大版本从项目自己的锁文件推断**（v5.4→pnpm7 / v6.0→pnpm8 / v9.0→pnpm9），不在 workflow 里另配一份，免得和项目脱节 |
+| `yarn` | `yarn install --frozen-lockfile` | `yarn.lock` | |
+
+装依赖前会先检查锁文件在不在 —— 缺了会直接报「找不到锁文件 xxx」，
+而不是让 `setup-node` 的缓存步骤抛一句看不懂的错。
 
 ## 多项目怎么不打架
 
