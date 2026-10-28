@@ -108,7 +108,9 @@ fi
 
 # 授权行：command= 把这台服务器上的任何 SSH 命令都顶成 push-incoming.sh
 # restrict 禁掉 pty / 端口转发 / agent 转发
-AUTH_LINE="command=\"${KIT_DIR}/push-incoming.sh\",restrict ${PUBKEY}"
+# ⚠️ 必须带 --project <名>：这把密钥只授权这一个项目，
+#    否则 kids 的 CI 密钥能往 xuexu 的产物目录里塞文件、也能触发 xuexu 发布。
+AUTH_LINE="command=\"${KIT_DIR}/push-incoming.sh --project ${PROJECT}\",restrict ${PUBKEY}"
 if grep -qF "$PUBKEY" "$KEYDIR/authorized_keys"; then
   log "authorized_keys 里已有这把公钥，跳过"
 else
@@ -121,7 +123,9 @@ log "验收："
 "$KIT_DIR/releaser.sh" status "$PROJECT" || die "releaser.sh status 跑不通"
 # ⚠️ 下面这行必须用 `|| true` 而不是 `; true`：
 #    `;` 只是分隔命令，set -e 照样会因前一条命令失败而退出整个脚本。
-SSH_ORIGINAL_COMMAND="incoming-dir ${PROJECT}" "$KIT_DIR/push-incoming.sh" \
+# ⚠️ 还必须带 --project：push-incoming.sh 现在**要求**绑定项目（没绑一律拒），
+#    自检这一步少传就会自己把自己判成失败。
+SSH_ORIGINAL_COMMAND="incoming-dir ${PROJECT}" "$KIT_DIR/push-incoming.sh" --project "${PROJECT}" \
   | sed 's|^|  产物目录: |'
 
 cat <<EOF

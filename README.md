@@ -32,9 +32,42 @@ deploy-kit/
 └── docs/部署架构方案.md
 ```
 
-## 新项目接入（三步）
+## 新项目接入（一条命令 + 两步）
 
-### ① 服务器上装一次
+### ① 一条命令生成接入物料
+
+在 deploy-kit 仓根目录：
+
+```bash
+bash server/new-project.sh --name <项目名> \
+     --project-repo ../<项目仓> \
+     --api-image <项目名>-api \
+     --api-dockerfile deploy/Dockerfile.api
+```
+
+它生成两个文件：
+
+| 文件 | 内容 |
+|---|---|
+| `server/projects.d/<项目名>.env` | 服务器上的项目注册表（路径、镜像名、要重建哪些服务） |
+| `<项目仓>/.github/workflows/deploy.yml` | 调用本仓 reusable workflow 的调用方 |
+
+常用开关：
+
+| 开关 | 用途 |
+|---|---|
+| `--no-api` | 纯前端项目（没有后端镜像） |
+| `--health-services "api caddy"` | 健康检查看哪些服务 |
+| `--app-services api` | 换镜像后重建哪些容器 |
+| `--web-services caddy` | 换前端后重建哪些容器 |
+| `--deploy-root /opt/<项目名>` | 服务器上的部署根目录 |
+| `--dry-run` | 只看要生成什么，不落盘 |
+
+> 多词的值（`--health-services "api caddy"`）生成时会**自动加引号** ——
+> 注册表条目是被 `.`（source）进 shell 的，不加引号时 `api caddy` 会被解析成两条赋值，
+> 第二个词被当成命令执行（exit 127）。
+
+### ② 服务器上装一次
 
 把 `deploy-kit/server/` 传到服务器，然后：
 
@@ -48,11 +81,11 @@ bash install-server.sh --project <项目名>
 - 把 `releaser.sh` / `push-incoming.sh` / 项目配置装到 `/opt/deploy-kit`
 - 建好 `incoming/`（产物落地）和 `releases/web/`（版本留存）
 - 生成一把 CI 专用 SSH 密钥，写进 `/root/.ssh/authorized_keys`，
-  带 `command="/opt/deploy-kit/push-incoming.sh",restrict` 限制
+  带 `command="/opt/deploy-kit/push-incoming.sh --project <项目名>",restrict` 限制
 
 先看它要做什么：`bash install-server.sh --project <项目名> --dry-run`
 
-### ② GitHub Secrets（仓库级）
+### ③ GitHub Secrets（仓库级）
 
 | Secret | 说明 |
 |---|---|
@@ -61,15 +94,11 @@ bash install-server.sh --project <项目名>
 | `DEPLOY_SSH_KEY` | 私钥内容（install-server.sh 打印了它在哪） |
 | `DEPLOY_PORT` | 可选，默认 22 |
 
-### ③ 项目仓加一个 workflow
+完事。以后这个项目的每次 push 都会自动构建 → 上传 → 原子发布。
+
+### 生成的 workflow 长这样
 
 ```yaml
-name: deploy
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
 jobs:
   deploy:
     uses: fmd99833125/deploy-kit/.github/workflows/deploy.yml@v1
@@ -83,8 +112,6 @@ jobs:
       skip_paths: '^(docs/|.*\.md$)'   # 只改文档时不发布
     secrets: inherit
 ```
-
-完事。以后这个项目的每次 push 都会自动构建 → 上传 → 原子发布。
 
 ## 多项目怎么不打架
 
@@ -121,20 +148,50 @@ CI 要往服务器推产物，就得有服务器私钥。私钥放在 GitHub Sec
 
 ```
 authorized_keys:
-  command="/opt/deploy-kit/push-incoming.sh",restrict ssh-ed25519 AAAA... github-actions
+  command="/opt/deploy-kit/push-incoming.sh --project xuexu",restrict ssh-ed25519 AAAA... github-actions
 ```
 
 `command=` 会顶掉 SSH 客户端请求的任何命令，`restrict` 禁掉 pty / 端口转发。
 泄露这把密钥，攻击者最多只能「把已经推上去的产物发布一下」，拿不到 shell。
 
+### ⭐ 密钥与项目绑定
+
+`--project <项目名>` 把这把密钥**焊死在一个项目上**：
+
+- 只能往**该项目**的产物目录里上传
+- 只能发布 / 查询**该项目**
+- **没绑定的密钥一律拒**（没有逃生口）
+
+为什么必须绑：多项目共用一台服务器时，不绑就等于**kids 的 CI 密钥能往 xuexu 的产物目录里塞文件、
+也能触发 xuexu 的发布** —— 一条现成的横向越权通道。这条是多项目彩排（T9）实测出来的。
+
+> 绑定信息写在 `authorized_keys` 的强制命令里，**不靠脚本猜**：
+> 同一把密钥服务多个项目时，各装一把带各自 `--project` 的密钥即可。
+
+### 命令白名单
+
 `push-incoming.sh` 只认白名单子命令，且项目名、sha、上传路径都做严格格式校验：
 
 | 命令 | 允许 | 拒绝的例子 |
 |---|---|---|
-| `scp -t <path>` | `<项目产物目录>/<sha>.{web-dist,api-image}.tar.gz` | `/etc/passwd`、`../../etc/x`、`nothex.web-dist.tar.gz` |
-| `apply <项目> <sha>` | 项目名 `^[a-z0-9][a-z0-9-]{0,30}$`、sha `^[0-9a-f]{7,40}$` | `apply xuexu; rm -rf /`、`apply ../../etc` |
+| `scp -t <path>` | `<本项目产物目录>/<sha>.{web-dist,api-image}.tar.gz` | `/etc/passwd`、`../../etc/x`、`nothex.web-dist.tar.gz`、**别的项目的目录** |
+| `apply <项目> <sha>` | 项目名 `^[a-z0-9][a-z0-9-]{0,30}$`、sha `^[0-9a-f]{7,40}$` | `apply xuexu; rm -rf /`、`apply ../../etc`、**apply 别的项目** |
 
-这些都有彩排断言覆盖（`server/tests/releaser-rehearsal.sh` T7）。
+这些都有彩排断言覆盖（`server/tests/releaser-rehearsal.sh` T7 / T9）。
+
+## 项目配置（`projects.d/<项目名>.env`）
+
+| 键 | 说明 |
+|---|---|
+| `PROJECT_NAME` | 项目标识 |
+| `REPO_DIR` / `DEPLOY_DIR` | 服务器上的代码仓 / 部署目录 |
+| `RELEASES_DIR` / `ARTIFACT_DIR` | 版本留存 / 产物落地 |
+| `WEB_SUBDIR` | 前端产物在 `deploy/` 下的子目录 |
+| `API_IMAGE` | 后端镜像名。**显式留空 = 本项目没有后端镜像**（纯前端站） |
+| `APP_SERVICES` | 换镜像后要重建的容器（跑业务代码的） |
+| `WEB_SERVICES` | 换前端后要重建的容器（bind mount 绑着 web 目录的） |
+| `HEALTH_SERVICES` | 健康检查看哪些服务：全部 running/healthy 才算发布成功 |
+| `KEEP_RELEASES` | 保留最近几个版本 |
 
 ## 本地彩排
 
@@ -144,12 +201,14 @@ bash server/tests/releaser-rehearsal.sh
 
 用假服务器目录 + 假 docker / flock / scp，把整条发布链路真跑一遍：
 正常发布、产物缺失、健康检查失败自动回滚、幂等、保留策略、手动回滚、
-**16 条命令注入/路径穿越防护**、安装脚本。
-共 73 条断言。
+**命令注入/路径穿越防护**、安装脚本、
+**多项目接入与隔离**（T9：脚手架生成、纯前端项目、两个项目互不干涉、跨项目越权被拒）。
+共 **117 条断言**。
 
 > 写完只做 `bash -n` 语法检查等于不知道会不会炸 ——
 > 2026-10-26 在 xuexu 迁移上已经吃过一次亏（彩排揪出 5 个「上生产必炸」Bug）。
-> 本仓第一批彩排也揪出 7 个（含 4 处 UTF-8 locale 下会崩的多字节变量名）。
+> 本仓彩排至今揪出 **9 个**（含 4 处 UTF-8 locale 下会崩的多字节变量名、
+> 「注册表多词值没加引号」这类**上服务器必炸**的问题、以及 1 条**跨项目越权**漏洞）。
 
 ## 相关
 

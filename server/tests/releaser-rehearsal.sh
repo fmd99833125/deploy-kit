@@ -209,7 +209,7 @@ else
 fi
 
 # 真实项目配置必须包含 releaser.sh 用到的全部键
-REQUIRED_KEYS="PROJECT_NAME REPO_DIR DEPLOY_DIR RELEASES_DIR ARTIFACT_DIR WEB_SUBDIR API_IMAGE HEALTH_SERVICES KEEP_RELEASES"
+REQUIRED_KEYS="PROJECT_NAME REPO_DIR DEPLOY_DIR RELEASES_DIR ARTIFACT_DIR WEB_SUBDIR API_IMAGE APP_SERVICES WEB_SERVICES HEALTH_SERVICES KEEP_RELEASES"
 MISSING=""
 for k in $REQUIRED_KEYS; do
   grep -qE "^${k}=" "$REAL_CONFIGS/xuexu.env" 2>/dev/null || MISSING="$MISSING $k"
@@ -340,16 +340,20 @@ cp "$SERVER_DIR/push-incoming.sh" "$ROOT7/kit/push-incoming.sh"
 chmod +x "$ROOT7/kit/push-incoming.sh"
 make_artifacts "$ROOT7" "1a2b3c4"
 
+# PIN_ARGS：模拟授权行里写死的 --project <名>
+#   真实安装后一定带（install-server.sh 写死）；没带 = 未绑定 = 一律拒。
+#   本组测的是「这把钥匙绑 xuexu」这个形态。
+PIN_ARGS="--project xuexu"
 run_push() {
   local root="$1"; shift
   SSH_ORIGINAL_COMMAND="$1" \
-  PATH="$root/bin:$PATH" \
-  STUB_LOG="$root/state/calls.log" \
-  STUB_STATE="$root/state" \
-  KIT_DIR="$root/kit" \
-  PROJECTS_DIR="$root/kit/projects.d" \
-  LOCK_DIR="$root/state" \
-  bash "$root/kit/push-incoming.sh" > "$root/state/push.log" 2>&1
+    PATH="$root/bin:$PATH" \
+    STUB_LOG="$root/state/calls.log" \
+    STUB_STATE="$root/state" \
+    KIT_DIR="$root/kit" \
+    PROJECTS_DIR="$root/kit/projects.d" \
+    LOCK_DIR="$root/state" \
+    bash "$root/kit/push-incoming.sh" ${PIN_ARGS} > "$root/state/push.log" 2>&1
   echo $?
 }
 
@@ -446,6 +450,7 @@ assert     "  · 产物目录建好了" "[ -d '$ROOT8/opt/learning/incoming' ]"
 assert     "  · 版本目录建好了" "[ -d '$ROOT8/opt/learning/releases/web' ]"
 assert     "  · 授权行带 command= 限制" "grep -q 'command=.*push-incoming.sh' '$ROOT8/home/.ssh/authorized_keys'"
 assert     "  · 授权行带 restrict" "grep -q 'restrict' '$ROOT8/home/.ssh/authorized_keys'"
+assert     "  · 授权行绑定了项目（这把钥匙只授权这一个项目）" "grep -q 'push-incoming.sh --project xuexu' '$ROOT8/home/.ssh/authorized_keys'"
 assert     "  · 私钥已生成" "[ -f '$ROOT8/home/.ssh/deploy_ci_ed25519' ]"
 assert     "  · 私钥权限 600" "[ \"\$(stat -c %a '$ROOT8/home/.ssh/deploy_ci_ed25519' 2>/dev/null || stat -f %Lp '$ROOT8/home/.ssh/deploy_ci_ed25519')\" = '600' ]"
 
@@ -457,6 +462,192 @@ assert "重复安装幂等（授权行数 ${N}）" "[ '$N' = 1 ]"
 # 未知项目必须被拒
 RC=$(run_install "$ROOT8" --project nosuchproject)
 assert_not "未知项目被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+# ===========================================================================
+section "T9 · 多项目接入与隔离"
+# ===========================================================================
+# 目标：新项目接入要「一条命令」，且两个项目**互不干涉**。
+# 隔离维度：产物目录 / 版本目录 / 仓目录 / 锁文件 / 镜像名 / compose 项目名。
+ROOT9="$SANDBOX_ROOT/t9"
+make_server "$ROOT9"; make_stubs "$ROOT9"
+: > "$ROOT9/state/images"; : > "$ROOT9/state/compose_ps"
+printf 'api\trunning\nworker\trunning\ncaddy\trunning\n' > "$ROOT9/state/compose_ps"
+cp "$SERVER_DIR/push-incoming.sh" "$ROOT9/kit/push-incoming.sh"
+chmod +x "$ROOT9/kit/push-incoming.sh"
+cp "$SERVER_DIR/new-project.sh" "$ROOT9/kit/new-project.sh"
+chmod +x "$ROOT9/kit/new-project.sh"
+
+run_new_project() {
+  local root="$1"; shift
+  bash "$root/kit/new-project.sh" "$@" > "$root/state/newproject.log" 2>&1
+  echo $?
+}
+
+# ── ① dry-run 不落盘 ───────────────────────────────────────────────────────
+RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo" --dry-run)
+assert "new-project --dry-run 退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert_not "  · 没写注册表条目" "[ -f '$ROOT9/kit/projects.d/kids.env' ]"
+assert_not "  · 没写 workflow" "[ -f '$ROOT9/project-repo/.github/workflows/deploy.yml' ]"
+
+# ── ② 真生成 ─────────────────────────────────────────────────────────────
+RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo" \
+      --api-image kids-api --api-dockerfile deploy/Dockerfile.server \
+      --health-services "api caddy" --app-services api \
+      --deploy-root "$ROOT9/opt/kids")
+assert "new-project 正式生成退出码为 0（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert     "  · 注册表条目生成了" "[ -f '$ROOT9/kit/projects.d/kids.env' ]"
+assert     "  · workflow 生成了" "[ -f '$ROOT9/project-repo/.github/workflows/deploy.yml' ]"
+
+# ── ③ 生成的注册表条目必须能被 releaser 吃下（所有必需键都在）──────────────
+MISSING=""
+for k in PROJECT_NAME REPO_DIR DEPLOY_DIR RELEASES_DIR ARTIFACT_DIR WEB_SUBDIR API_IMAGE; do
+  grep -qE "^${k}=" "$ROOT9/kit/projects.d/kids.env" || MISSING="${MISSING} ${k}"
+done
+assert "注册表条目关键键齐全（缺：${MISSING:-无}）" "[ -z \"\$MISSING\" ]"
+
+# ⚠️ 这份文件会被 . (source) 进来 —— 多词值不加引号会被解析成多条赋值，
+#    第二个词会被当成命令执行（exit 127）。这里真 source 一次。
+if ( set -a; . "$ROOT9/kit/projects.d/kids.env" ) 2>/dev/null; then
+  ok "注册表条目能被正常 source"
+else
+  bad "注册表条目 source 失败（多半是值没加引号）"
+fi
+if ( . "$ROOT9/kit/projects.d/kids.env"; echo "$HEALTH_SERVICES" ) 2>/dev/null | grep -q 'api caddy'; then
+  ok "  · HEALTH_SERVICES 是完整的 'api caddy'"
+else
+  bad "  · HEALTH_SERVICES 被截断了"
+fi
+
+# 注册表条目里的路径要指向 sandbox 而不是真服务器
+assert "  · 产物目录指向沙箱" "grep -q 'ARTIFACT_DIR=$ROOT9/opt/kids/incoming' '$ROOT9/kit/projects.d/kids.env'"
+assert "  · 版本目录指向沙箱" "grep -q 'RELEASES_DIR=$ROOT9/opt/kids/releases' '$ROOT9/kit/projects.d/kids.env'"
+
+# ── ④ 生成的 workflow 必须是合法 YAML，且关键参数对 ───────────────────────
+if command -v python3 >/dev/null 2>&1; then
+  WF="$ROOT9/project-repo/.github/workflows/deploy.yml"
+  if python3 -c "
+import yaml,sys
+d=yaml.safe_load(open('$WF'))
+j=d['jobs']['deploy']
+w=j['with']
+assert w['project']=='kids', w
+assert w['api_image']=='kids-api', w
+assert w['api_dockerfile']=='deploy/Dockerfile.server', w
+assert 'uses' in j and 'deploy-kit' in j['uses'], j
+assert j['secrets']=='inherit'
+" 2>/dev/null; then
+    ok "生成的 workflow 是合法 YAML，参数都对"
+  else
+    bad "生成的 workflow YAML 有问题"
+  fi
+else
+  printf '  \033[1;33m⚠️ \033[0m 没有 python3，跳过 workflow YAML 校验\n'
+fi
+
+# ── ⑤ 拒绝覆盖 / 拒绝非法名 ──────────────────────────────────────────────
+RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo")
+assert_not "重复生成被拒（无 --force，实际 ${RC}）" "[ '$RC' = 0 ]"
+RC=$(run_new_project "$ROOT9" --name "Bad_Name" --project-repo "$ROOT9/project-repo")
+assert_not "非法项目名被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo" \
+      --api-image kids-api --api-dockerfile deploy/Dockerfile.server \
+      --health-services "api caddy" --app-services api \
+      --deploy-root "$ROOT9/opt/kids" --force)
+assert "--force 能覆盖（实际 ${RC}）" "[ '$RC' = 0 ]"
+# ⚠️ --force 重生成必须带全套参数：漏一个（比如 --deploy-root）
+#    就会把注册表条目覆写成默认路径 → 服务器上指向错目录 → 发布时找不到产物。
+assert "  · 重生成后路径没漂移" "grep -q 'ARTIFACT_DIR=$ROOT9/opt/kids/incoming' '$ROOT9/kit/projects.d/kids.env'"
+
+# ── ⑥ 纯前端项目（没有后端镜像）也要能接 ─────────────────────────────────
+RC=$(run_new_project "$ROOT9" --name static --project-repo "$ROOT9/project-repo2" --no-api)
+assert "纯前端项目生成成功（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 注册表条目里 API_IMAGE 显式留空" "grep -qE '^API_IMAGE=$' '$ROOT9/kit/projects.d/static.env'"
+assert_not "  · workflow 里没有 api_image" "grep -q 'api_image' '$ROOT9/project-repo2/.github/workflows/deploy.yml'"
+
+# 纯前端项目发布：只换前端，不碰镜像
+mkdir -p "$ROOT9/opt/static/repo/deploy/web" "$ROOT9/opt/static/incoming" "$ROOT9/opt/static/releases/web"
+cat > "$ROOT9/kit/projects.d/static.env" <<EOF
+PROJECT_NAME=static
+REPO_DIR=$ROOT9/opt/static/repo
+DEPLOY_DIR=$ROOT9/opt/static/repo/deploy
+RELEASES_DIR=$ROOT9/opt/static/releases
+ARTIFACT_DIR=$ROOT9/opt/static/incoming
+WEB_SUBDIR=web
+API_IMAGE=
+APP_SERVICES=
+WEB_SERVICES=caddy
+HEALTH_SERVICES=caddy
+KEEP_RELEASES=3
+EOF
+echo '<html>static</html>' > "$ROOT9/opt/static/repo/deploy/web/index.html"
+tar -czf "$ROOT9/opt/static/incoming/aaa1111.web-dist.tar.gz" -C "$ROOT9/opt/static/repo/deploy/web" .
+RC=$(run_releaser "$ROOT9" has static aaa1111)
+assert "纯前端项目 has 通过（实际 ${RC}）" "[ '$RC' = 0 ]"
+RC=$(run_releaser "$ROOT9" apply static aaa1111)
+assert "纯前端项目 apply 通过（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert_not "  · 没有载入镜像" "grep -q 'docker load' '$ROOT9/state/calls.log'"
+
+# ── ⑦ 两个项目互不干涉 ───────────────────────────────────────────────────
+# 给 kids 补齐沙箱目录，发布一次
+mkdir -p "$ROOT9/opt/kids/repo/deploy/web" "$ROOT9/opt/kids/releases/web" "$ROOT9/opt/kids/incoming"
+echo '<html>kids</html>' > "$ROOT9/opt/kids/repo/deploy/web/index.html"
+tar -czf "$ROOT9/opt/kids/incoming/bbb2222.web-dist.tar.gz" -C "$ROOT9/opt/kids/repo/deploy/web" .
+printf 'IMAGE_TAG=kids-api:bbb2222\n' | gzip > "$ROOT9/opt/kids/incoming/bbb2222.api-image.tar.gz"
+: > "$ROOT9/state/calls.log"
+
+RC=$(run_releaser "$ROOT9" apply kids bbb2222)
+assert "kids 发布成功（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+assert "  · kids 用的是自己的镜像 tag" "grep -q 'kids-api:bbb2222' '$ROOT9/state/calls.log'"
+assert_not "  · 没碰 xuexu 的镜像" "grep -q 'xuexu-api' '$ROOT9/state/calls.log'"
+assert "  · kids 的前端目录独立" "[ -d '$ROOT9/opt/kids/repo/deploy/web' ]"
+assert "  · kids 的前端内容是它自己的" "grep -q 'kids' '$ROOT9/opt/kids/repo/deploy/web/index.html'"
+assert "  · xuexu 的目录没被动（还是原来的内容）" "grep -q 'OLD000' '$ROOT9/opt/learning/repo/deploy/web/index.html'"
+assert_not "  · xuexu 没多出 web.old（没被换过目录）" "[ -d '$ROOT9/opt/learning/repo/deploy/web.old' ]"
+
+# 版本目录互不干扰
+assert "  · kids 的版本进自己的 releases" "[ -d '$ROOT9/opt/kids/releases/web/bbb2222' ]"
+assert_not "  · xuexu 的 releases 里没有 kids 的版本" "[ -d '$ROOT9/opt/learning/releases/web/bbb2222' ]"
+
+# 锁文件按项目分
+assert "  · 锁文件按项目名分开" "[ -f '$ROOT9/state/deploy-kids.lock' ]"
+
+# ── ⑧ 跨项目投毒必须被拒 ─────────────────────────────────────────────────
+# kids 的 CI 密钥不能把产物推进 xuexu 的目录
+RC=$(run_push "$ROOT9" "scp -t $ROOT9/opt/kids/incoming/ccc3333.web-dist.tar.gz")
+assert_not "把产物推进别的项目目录被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+# 未注册的项目
+RC=$(run_push "$ROOT9" "apply nosuchproject 1a2b3c4")
+assert_not "发布未注册项目被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+# ── ⑨ 绑定模式：钥匙只授权一个项目 ───────────────────────────────────────
+# 这才是真实安装后的形态：授权行写死 command="... push-incoming.sh --project kids"
+PIN_ARGS="--project kids"
+
+RC=$(run_push "$ROOT9" "scp -t $ROOT9/opt/kids/incoming/ddd4444.web-dist.tar.gz")
+assert "绑定模式下推进自己项目的目录被接受（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+RC=$(run_push "$ROOT9" "scp -t $ROOT9/opt/learning/incoming/eee5555.web-dist.tar.gz")
+assert_not "绑定模式下推进别的项目目录被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+assert "  · 报错说清了只授权了 kids" "grep -q '只授权' '$ROOT9/state/push.log'"
+
+RC=$(run_push "$ROOT9" "apply xuexu 1a2b3c4")
+assert_not "绑定模式下发布别的项目被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+RC=$(run_push "$ROOT9" "apply kids bbb2222")
+assert "绑定模式下发布自己项目被接受（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+RC=$(run_push "$ROOT9" "incoming-dir xuexu")
+assert_not "绑定模式下问别的项目的产物目录被拒（实际 ${RC}）" "[ '$RC' = 0 ]"
+
+# 未绑定 → 一律拒（没有逃生口）
+PIN_ARGS=""
+RC=$(run_push "$ROOT9" "scp -t $ROOT9/opt/kids/incoming/fff6666.web-dist.tar.gz")
+assert_not "未绑定项目时拒绝上传（实际 ${RC}）" "[ '$RC' = 0 ]"
+RC=$(run_push "$ROOT9" "apply kids bbb2222")
+assert_not "未绑定项目时拒绝发布（实际 ${RC}）" "[ '$RC' = 0 ]"
+RC=$(run_push "$ROOT9" "status kids")
+assert_not "未绑定项目时拒绝查状态（实际 ${RC}）" "[ '$RC' = 0 ]"
 
 # ===========================================================================
 printf '\n\033[1m═══ 结果：%d 通过 / %d 失败 ═══\033[0m\n' "$PASS" "$FAIL"

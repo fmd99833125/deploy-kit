@@ -50,7 +50,15 @@ load_project() {
   RELEASES_DIR="${RELEASES_DIR:-$REPO_DIR/releases}"
   ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO_DIR/incoming}"
   WEB_SUBDIR="${WEB_SUBDIR:-web}"
-  API_IMAGE="${API_IMAGE:-$PROJECT_NAME-api}"
+  # ⚠️ 这里用 `-` 不是 `:-`：
+  #    配置里**显式写空**（API_IMAGE=）= 本项目没有后端镜像（纯前端站），
+  #    配置里**完全不写** = 用默认名 <项目名>-api。
+  API_IMAGE="${API_IMAGE-$PROJECT_NAME-api}"
+  # 换镜像后要重建的服务（跑业务代码的容器）
+  APP_SERVICES="${APP_SERVICES:-api worker}"
+  # 换前端后要重建的服务（bind mount 绑着 web 目录，必须重建才重新解析 inode）
+  WEB_SERVICES="${WEB_SERVICES:-caddy}"
+  # 健康检查看哪些服务
   HEALTH_SERVICES="${HEALTH_SERVICES:-api worker caddy}"
   KEEP_RELEASES="${KEEP_RELEASES:-3}"
   STATE_FILE="$RELEASES_DIR/.current"
@@ -101,7 +109,9 @@ cmd_has() {
   local img="$ARTIFACT_DIR/${sha}.api-image.tar.gz"
   local ok=1
   [ -f "$art" ] || { warn "缺前端产物：$art"; ok=0; }
-  [ -f "$img" ] || { warn "缺后端镜像：$img"; ok=0; }
+  if [ -n "$API_IMAGE" ]; then
+    [ -f "$img" ] || { warn "缺后端镜像：$img"; ok=0; }
+  fi
   [ "$ok" = "1" ] || return 1
   return 0
 }
@@ -117,7 +127,9 @@ cmd_apply() {
   local art="$ARTIFACT_DIR/${sha}.web-dist.tar.gz"
   local img="$ARTIFACT_DIR/${sha}.api-image.tar.gz"
   [ -f "$art" ] || die "缺前端产物：${art}（CI 还没传完？）"
-  [ -f "$img" ] || die "缺后端镜像：${img}（CI 还没传完？）"
+  if [ -n "$API_IMAGE" ]; then
+    [ -f "$img" ] || die "缺后端镜像：${img}（CI 还没传完？）"
+  fi
 
   local prev_sha=""
   [ -f "$STATE_FILE" ] && prev_sha="$(cat "$STATE_FILE")"
@@ -131,11 +143,15 @@ cmd_apply() {
   [ -f "$rel_web.tmp/index.html" ] || die "前端产物里没有 index.html —— 打包结构不对"
   mv "$rel_web.tmp" "$rel_web"
 
-  # ---- 2. 载入后端镜像并打上固定 tag ----
-  log "载入镜像"
-  gunzip -c "$img" | docker load >/dev/null
-  docker tag "${API_IMAGE}:${sha}" "${API_IMAGE}:current"
-  docker tag "${API_IMAGE}:${sha}" "${API_IMAGE}:${sha}" 2>/dev/null || true
+  # ---- 2. 载入后端镜像并打上固定 tag（纯前端项目跳过）----
+  if [ -n "$API_IMAGE" ]; then
+    log "载入镜像"
+    gunzip -c "$img" | docker load >/dev/null
+    docker tag "${API_IMAGE}:${sha}" "${API_IMAGE}:current"
+    docker tag "${API_IMAGE}:${sha}" "${API_IMAGE}:${sha}" 2>/dev/null || true
+  else
+    log "本项目没有后端镜像（API_IMAGE 为空），只发布前端"
+  fi
 
   # ---- 3. 原子替换 web 目录（换 inode，bind mount 才会重新解析）----
   log "替换前端目录"
@@ -148,10 +164,12 @@ cmd_apply() {
   fi
   mv "$WEB_DIR.new" "$WEB_DIR"
 
-  # ---- 4. 起容器（镜像 tag 变了，compose 会重建 api/worker）----
+  # ---- 4. 起容器（镜像 tag 变了，compose 会重建跑业务的服务）----
   log "重建容器"
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate api worker) || true
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate caddy) || true
+  # shellcheck disable=SC2086
+  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
+  # shellcheck disable=SC2086
+  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
 
   # ---- 5. 健康检查；不过就回滚 ----
   sleep 3
@@ -183,15 +201,19 @@ do_rollback() {
     warn "没有可回滚的前端目录（$WEB_OLD_DIR 不存在）"
   fi
 
-  # 后端：把旧镜像重新打成 current
-  if [ -n "$prev_sha" ] && docker image inspect "${API_IMAGE}:${prev_sha}" >/dev/null 2>&1; then
-    docker tag "${API_IMAGE}:${prev_sha}" "${API_IMAGE}:current"
-  else
-    warn "旧镜像 ${API_IMAGE}:${prev_sha:-?} 不在本地，后端无法回滚"
+  # 后端：把旧镜像重新打成 current（纯前端项目没有镜像要回滚）
+  if [ -n "$API_IMAGE" ]; then
+    if [ -n "$prev_sha" ] && docker image inspect "${API_IMAGE}:${prev_sha}" >/dev/null 2>&1; then
+      docker tag "${API_IMAGE}:${prev_sha}" "${API_IMAGE}:current"
+    else
+      warn "旧镜像 ${API_IMAGE}:${prev_sha:-?} 不在本地，后端无法回滚"
+    fi
   fi
 
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate api worker) || true
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate caddy) || true
+  # shellcheck disable=SC2086
+  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
+  # shellcheck disable=SC2086
+  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
   sleep 3
   health_check || warn "回滚后健康检查仍未通过 —— 需要人工介入"
 
@@ -236,7 +258,11 @@ cmd_status() {
   # 版本目录名是十六进制 sha（不含空格等特殊字符），xargs -n1 basename 是安全的
   # shellcheck disable=SC2011
   printf '  已存版本  : %s\n' "$(ls -1dt "$RELEASES_DIR"/web/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ' || echo '（无）')"
-  printf '  镜像      : %s\n' "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${API_IMAGE}:" | tr '\n' ' ' || echo '（无）')"
+  if [ -n "$API_IMAGE" ]; then
+    printf '  镜像      : %s\n' "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${API_IMAGE}:" | tr '\n' ' ' || echo '（无）')"
+  else
+    printf '  镜像      : （本项目无后端镜像）\n'
+  fi
 }
 
 # ---------------------------------------------------------------------------
