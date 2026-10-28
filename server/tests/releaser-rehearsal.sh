@@ -693,6 +693,22 @@ assert "  · 上传用的 scp 带 -O（否则 OpenSSH 9.0+ 走 SFTP，会被 com
 assert "  · 受限入口认的是老协议（exec scp -t）" \
   "grep -q 'exec scp -t' server/push-incoming.sh"
 
+# ── ④之六 pnpm 必须装在 setup-node 之前 ───────────────────────────────────
+# ⚠️ 2026-10-28 实测（kids 首次发布踩的）：
+#    setup-node 配了 cache: pnpm 之后，它会执行 `pnpm store path` 找缓存目录 ——
+#    而那时 pnpm 还没装 → @actions/exec 抛
+#    「Unable to locate executable file: pnpm. Please verify either the file path
+#      exists or the file can be found within a directory specified by the PATH...」
+#    → 整个 job 挂掉，报错还完全看不出是「步骤顺序」的问题。
+#    npm 不会踩（node 自带 npm）；yarn 也不会（它自己管 store）。
+#    正确顺序是 pnpm/action-setup → actions/setup-node（pnpm 官方文档的要求）。
+assert "  · 安装 pnpm 在 准备 Node 之前（setup-node 的 cache: pnpm 需要 pnpm 已存在）" \
+  "[ \"\$(grep -n 'name: 安装 pnpm' .github/workflows/deploy.yml | head -1 | cut -d: -f1)\" -lt \"\$(grep -n 'name: 准备 Node' .github/workflows/deploy.yml | head -1 | cut -d: -f1)\" ]"
+assert "  · 装 pnpm 用的是官方 pnpm/action-setup" \
+  "grep -q 'pnpm/action-setup' .github/workflows/deploy.yml"
+assert "  · setup-node 的缓存跟着包管理器走（pnpm 时确实开了 pnpm 缓存）" \
+  "grep -q 'cache: .*inputs.package_manager' .github/workflows/deploy.yml"
+
 # ── ⑤ 拒绝覆盖 / 拒绝非法名 ──────────────────────────────────────────────
 RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo")
 assert_not "重复生成被拒（无 --force，实际 ${RC}）" "[ '$RC' = 0 ]"

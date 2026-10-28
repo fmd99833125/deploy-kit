@@ -107,6 +107,18 @@ bash install-server.sh --project <项目名>
 
 完事。以后这个项目的每次 push 都会自动构建 → 上传 → 原子发布。
 
+### 步骤顺序铁律（改 workflow 前先看这条）
+
+```
+检查锁文件 → 读 pnpm 版本 → 安装 pnpm → 准备 Node → 安装依赖 → 构建
+                          ^^^^^^^^^^^^   ^^^^^^^^^
+                          必须在前面 ─────┘
+```
+
+`actions/setup-node` 配了 `cache: pnpm` 之后，它会执行 `pnpm store path` 去找缓存目录 ——
+**那时 pnpm 还没装** → 报 `Unable to locate executable file: pnpm` → 整个 job 挂掉，
+而报错完全看不出是「步骤顺序」的问题（npm 不会踩：node 自带 npm）。
+
 ### 生成的 workflow 长这样
 
 ```yaml
@@ -231,7 +243,7 @@ bash server/tests/releaser-rehearsal.sh
 正常发布、产物缺失、健康检查失败自动回滚、幂等、保留策略、手动回滚、
 **命令注入/路径穿越防护**、安装脚本、
 **多项目接入与隔离**（T9：脚手架生成、纯前端项目、两个项目互不干涉、跨项目越权被拒）。
-共 **138 条断言**。
+共 **141 条断言**。
 
 > ⚠️ 2026-10-28 踩坑：workflow 里同一个 step 写了两条 `if`，GitHub 判
 > `Invalid workflow file ... 'if' is already defined` —— 而 Python 的 `yaml.safe_load`

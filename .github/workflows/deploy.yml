@@ -133,15 +133,8 @@ jobs:
           fi
           echo "✅ 私钥格式校验通过"
 
-      # ── 构建前端 ──────────────────────────────────────────────────────────
-      - name: 准备 Node
-        if: steps.check.outputs.should_deploy == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version }}
-          cache: ${{ inputs.package_manager == 'npm' && 'npm' || inputs.package_manager }}
-          cache-dependency-path: ${{ inputs.package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.web_dir) || inputs.package_manager == 'yarn' && format('{0}/yarn.lock', inputs.web_dir) || format('{0}/package-lock.json', inputs.web_dir) }}
 
+      # ── 构建前端 ──────────────────────────────────────────────────────────
       # ⚠️ 先查锁文件在不在 —— 少了它，setup-node 的缓存步骤会报一句
       #    莫名其妙的错，看不出是「这个项目根本没提交锁文件」。
       - name: 检查锁文件
@@ -180,6 +173,19 @@ jobs:
         uses: pnpm/action-setup@v4
         with:
           version: ${{ steps.pnpmver.outputs.version }}
+
+      # ⚠️ 顺序铁律：**装 pnpm 必须在准备 Node 之前**。
+      #    setup-node 配了 cache: pnpm 之后，它会执行 `pnpm store path` 去找缓存目录；
+      #    而那时 pnpm 还没装 → @actions/exec 抛
+      #    「Unable to locate executable file: pnpm」→ 整个 job 挂掉。
+      #    这也是 pnpm 官方文档给 setup-node 配缓存时要求的顺序。
+      - name: 准备 Node
+        if: steps.check.outputs.should_deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ inputs.package_manager == 'npm' && 'npm' || inputs.package_manager }}
+          cache-dependency-path: ${{ inputs.package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.web_dir) || inputs.package_manager == 'yarn' && format('{0}/yarn.lock', inputs.web_dir) || format('{0}/package-lock.json', inputs.web_dir) }}
 
       - name: 安装前端依赖
         if: steps.check.outputs.should_deploy == 'true'
