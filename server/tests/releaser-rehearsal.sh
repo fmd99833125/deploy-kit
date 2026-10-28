@@ -622,6 +622,16 @@ PYEOF
   fi
 fi
 
+# ── ④之五 scp 必须走老协议（-O）─────────────────────────────────────────
+# ⚠️ 2026-10-28 踩坑：OpenSSH 9.0+ 的 scp 默认改走 SFTP（发的是 subsystem 请求），
+#    而 authorized_keys 里的 command="..." 会**顶掉 subsystem 请求** →
+#    受限入口脚本去接 SFTP 的活 → 客户端看到 "scp: Connection closed"。
+#    必须 -O 强制走老协议（远程命令 = scp -t <path>），受限入口才认得。
+assert "  · 上传用的 scp 带 -O（否则 OpenSSH 9.0+ 走 SFTP，会被 command= 顶掉）" \
+  "grep -q 'scp -O' .github/workflows/deploy.yml"
+assert "  · 受限入口认的是老协议（exec scp -t）" \
+  "grep -q 'exec scp -t' server/push-incoming.sh"
+
 # ── ⑤ 拒绝覆盖 / 拒绝非法名 ──────────────────────────────────────────────
 RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo")
 assert_not "重复生成被拒（无 --force，实际 ${RC}）" "[ '$RC' = 0 ]"

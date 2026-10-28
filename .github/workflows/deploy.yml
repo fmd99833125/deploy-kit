@@ -234,7 +234,11 @@ jobs:
           set -Eeuo pipefail
           PORT="${DEPLOY_PORT:-22}"
           SSH=(ssh -i ~/.ssh/deploy_key -p "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
-          SCP=(scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          # ⚠️ scp 必须带 -O：OpenSSH 9.0+ 的 scp 默认走 SFTP（subsystem 请求），
+          #    而 authorized_keys 里的 command="..." 会顶掉 subsystem 请求 →
+          #    受限入口脚本接了 SFTP 的活 → "scp: Connection closed"。
+          #    -O 强制走老协议（远程命令 = scp -t <path>），受限入口才认得。
+          SCP=(scp -O -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
           TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
           # 先做纯 TCP 探活，把「网络不通」和「认证失败」分成两类

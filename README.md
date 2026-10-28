@@ -222,7 +222,7 @@ bash server/tests/releaser-rehearsal.sh
 正常发布、产物缺失、健康检查失败自动回滚、幂等、保留策略、手动回滚、
 **命令注入/路径穿越防护**、安装脚本、
 **多项目接入与隔离**（T9：脚手架生成、纯前端项目、两个项目互不干涉、跨项目越权被拒）。
-共 **124 条断言**。
+共 **126 条断言**。
 
 > ⚠️ 2026-10-28 踩坑：workflow 里同一个 step 写了两条 `if`，GitHub 判
 > `Invalid workflow file ... 'if' is already defined` —— 而 Python 的 `yaml.safe_load`
