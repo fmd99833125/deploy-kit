@@ -166,10 +166,16 @@ cmd_apply() {
 
   # ---- 4. 起容器（镜像 tag 变了，compose 会重建跑业务的服务）----
   log "重建容器"
-  # shellcheck disable=SC2086
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
-  # shellcheck disable=SC2086
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
+  # 服务列表可以留空 —— 有些项目「前端也由 api 自己托管」（同域挂 web/dist），
+  # 那就只需要在换前端时重建它一次，不必重建两遍。
+  if [ -n "$APP_SERVICES" ]; then
+    # shellcheck disable=SC2086
+    (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
+  fi
+  if [ -n "$WEB_SERVICES" ]; then
+    # shellcheck disable=SC2086
+    (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
+  fi
 
   # ---- 5. 健康检查；不过就回滚 ----
   sleep 3
@@ -210,10 +216,14 @@ do_rollback() {
     fi
   fi
 
-  # shellcheck disable=SC2086
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
-  # shellcheck disable=SC2086
-  (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
+  if [ -n "$APP_SERVICES" ]; then
+    # shellcheck disable=SC2086
+    (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $APP_SERVICES) || true
+  fi
+  if [ -n "$WEB_SERVICES" ]; then
+    # shellcheck disable=SC2086
+    (cd "$DEPLOY_DIR" && docker compose up -d --force-recreate $WEB_SERVICES) || true
+  fi
   sleep 3
   health_check || warn "回滚后健康检查仍未通过 —— 需要人工介入"
 

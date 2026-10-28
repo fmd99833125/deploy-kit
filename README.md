@@ -210,7 +210,16 @@ bash server/tests/releaser-rehearsal.sh
 > 本仓彩排至今揪出 **9 个**（含 4 处 UTF-8 locale 下会崩的多字节变量名、
 > 「注册表多词值没加引号」这类**上服务器必炸**的问题、以及 1 条**跨项目越权**漏洞）。
 
+## 已接入的项目
+
+| 项目 | 状态 | 备注 |
+|---|---|---|
+| `xuexu` | ✅ 改造完成 | Caddy 托管前端 + 反代 api；compose 项目名 `learning`（**别改**） |
+| `kids-english-copilot` | ✅ 接入物料齐备 | FastAPI 同域托管前端，单容器；compose 项目名 `kids-copilot` |
+
 ## 相关
 
 - [部署架构方案](./docs/部署架构方案.md)
+- [未完成工作清单](./docs/未完成工作清单.md) ← **接着干先看这个**
 - xuexu 的接入实例：`../xuexu/deploy/`
+- kids 的接入实例：`../kids-english-copilot/deploy/`
