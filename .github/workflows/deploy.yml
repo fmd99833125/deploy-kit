@@ -113,6 +113,26 @@ jobs:
             echo "should_deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── 配置并校验 SSH 密钥 ────────────────────────────────────────────────
+      # ⚠️ 放在最前面：密钥不对就别浪费一次构建
+      - name: 配置 SSH 密钥
+        if: steps.check.outputs.should_deploy == 'true'
+        run: |
+          set -Eeuo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # 密钥格式自检：少了 BEGIN/END armor、粘成 .pub、粘了公钥，都在这里被抓住
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "❌ DEPLOY_SSH_KEY 格式不对（ssh-keygen 解析不了）"
+            echo "   多半是这两种："
+            echo "     ① 少了头尾两行 armor："
+            echo "        -----BEGIN OPENSSH PRIVATE KEY-----  /  -----END OPENSSH PRIVATE KEY-----"
+            echo "     ② 粘成了 .pub 公钥（公钥是单行 ssh-ed25519 AAAA... 开头）"
+            exit 1
+          fi
+          echo "✅ 私钥格式校验通过"
+
       # ── 构建前端 ──────────────────────────────────────────────────────────
       - name: 准备 Node
         if: steps.check.outputs.should_deploy == 'true'
@@ -201,15 +221,6 @@ jobs:
           docker save "${{ inputs.api_image }}:${{ github.sha }}" | gzip > "$RUNNER_TEMP/api-image.tar.gz"
           echo "镜像产物：$(du -h "$RUNNER_TEMP/api-image.tar.gz" | cut -f1)"
 
-      # ── 配置 SSH ──────────────────────────────────────────────────────────
-      - name: 配置 SSH 密钥
-        if: steps.check.outputs.should_deploy == 'true'
-        run: |
-          set -Eeuo pipefail
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
       # ── 上传产物 ──────────────────────────────────────────────────────────
       # 产物落地目录由服务器自己报（incoming-dir），避免 CI 和服务器各写一份路径
       - name: 上传产物到服务器
@@ -226,7 +237,19 @@ jobs:
           SCP=(scp -i ~/.ssh/deploy_key -P "$PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
           TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
-          ARTIFACT_DIR="$("${SSH[@]}" "$TARGET" "incoming-dir ${{ inputs.project }}" | tail -1)"
+          # 先做纯 TCP 探活，把「网络不通」和「认证失败」分成两类
+          if ! timeout 20 bash -c "</dev/tcp/${DEPLOY_HOST}/${PORT}" 2>/dev/null; then
+            echo "❌ TCP 连不上 ${DEPLOY_HOST}:${PORT}"
+            echo "   → 网络/防火墙问题（安全组没放行，或中间设备在杀流量），跟密钥无关"
+            exit 1
+          fi
+          echo "✅ TCP 通：${DEPLOY_HOST}:${PORT}"
+
+          if ! ARTIFACT_DIR="$("${SSH[@]}" "$TARGET" "incoming-dir ${{ inputs.project }}" | tail -1)"; then
+            echo "❌ SSH 失败，下面是详细日志（贴这段就能定位）："
+            "${SSH[@]}" -v -o ConnectTimeout=15 "$TARGET" "true" 2>&1 | tail -30 || true
+            exit 1
+          fi
           [ -n "$ARTIFACT_DIR" ] || { echo "❌ 拿不到产物目录"; exit 1; }
           echo "产物目录：$ARTIFACT_DIR"
 
