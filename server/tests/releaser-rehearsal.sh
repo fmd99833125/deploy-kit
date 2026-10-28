@@ -569,6 +569,59 @@ assert inp['package_manager']['default']=='npm', inp['package_manager']
   fi
 fi
 
+# ── ④之四 workflow 静态体检：重复键 / step id / input 引用 ──────────────────
+# 2026-10-28 踩坑：同一个 step 写了两条 if，GitHub 报 "'if' is already defined"，
+# 整个 workflow 解析失败 —— 而 Python 的 yaml.safe_load 对【重复键是静默覆盖】，
+# 本地校验全绿，只有真跑 workflow 才炸。这里用严格 loader 在彩排里就拦下来。
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - "$PWD/.github/workflows/deploy.yml" "$ROOT9/project-repo/.github/workflows/deploy.yml" <<'PYEOF'
+import yaml, re, sys
+
+class Strict(yaml.SafeLoader):
+    pass
+
+def no_dup(loader, node, deep=False):
+    mapping = {}
+    for k, v in node.value:
+        key = loader.construct_object(k, deep=deep)
+        if key in mapping:
+            raise AssertionError("重复键 '%s'（第 %d 行）" % (key, k.start_mark.line + 1))
+        mapping[key] = loader.construct_object(v, deep=deep)
+    return mapping
+
+Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, no_dup)
+
+for path in sys.argv[1:]:
+    d = yaml.load(open(path, encoding='utf-8'), Loader=Strict)
+    on = d[True] if True in d else d['on']
+    declared = set((on.get('workflow_call') or {}).get('inputs', {}))
+    ids, refs, used = set(), set(), set()
+    for job in d['jobs'].values():
+        for s in job.get('steps', []):
+            if 'id' in s:
+                ids.add(s['id'])
+            blob = yaml.dump(s, allow_unicode=True)
+            refs |= set(re.findall(r'steps\.([A-Za-z0-9_-]+)\.', blob))
+            for k in ('if', 'run', 'env'):
+                v = s.get(k)
+                if isinstance(v, str):
+                    used |= set(re.findall(r'inputs\.([A-Za-z0-9_]+)', v))
+            for v in (s.get('with') or {}).values():
+                if isinstance(v, str):
+                    used |= set(re.findall(r'inputs\.([A-Za-z0-9_]+)', v))
+    missing_steps = refs - ids
+    missing_inputs = used - declared
+    assert not missing_steps, "%s 引用了不存在的 step id: %s" % (path, missing_steps)
+    assert not missing_inputs, "%s 引用了未声明的 input: %s" % (path, missing_inputs)
+print("OK")
+PYEOF
+  then
+    ok "workflow 静态体检通过（无重复键 / step id 与 input 引用都对得上）"
+  else
+    bad "workflow 静态体检不通过（重复键？引用了不存在的 step id / input？）"
+  fi
+fi
+
 # ── ⑤ 拒绝覆盖 / 拒绝非法名 ──────────────────────────────────────────────
 RC=$(run_new_project "$ROOT9" --name kids --project-repo "$ROOT9/project-repo")
 assert_not "重复生成被拒（无 --force，实际 ${RC}）" "[ '$RC' = 0 ]"

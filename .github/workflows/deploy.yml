@@ -189,8 +189,9 @@ jobs:
 
       # ── 构建后端镜像 ──────────────────────────────────────────────────────
       - name: 构建后端镜像
-        if: steps.check.outputs.should_deploy == 'true'
-        if: inputs.api_image != ''
+        # ⚠️ 同一个 step 只能有一个 if：两条 if 会被 GitHub 判成 "if is already defined"，
+        #    整个 workflow 直接解析失败（2026-10-28 踩过）
+        if: steps.check.outputs.should_deploy == 'true' && inputs.api_image != ''
         run: |
           set -Eeuo pipefail
           docker build \
