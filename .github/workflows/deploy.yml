@@ -190,6 +190,11 @@ jobs:
       - name: 安装前端依赖
         if: steps.check.outputs.should_deploy == 'true'
         working-directory: ${{ inputs.web_dir }}
+        # 私有包凭据：装 @scope/私有包（如 @fmd99833125/liquid-glass 走 GitHub Packages）时，
+        # 消费方的 .npmrc 里写 `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`，
+        # token 从各项目仓的 secret NPM_TOKEN 透传进来 —— **没有这个 secret 也不影响**（空值 = 不需要鉴权）。
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -Eeuo pipefail
           case "${{ inputs.package_manager }}" in
