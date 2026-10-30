@@ -60,6 +60,11 @@ on:
         required: false
         type: string
         default: "npm"
+      ref:
+        description: "要检出的分支或 commit；留空 = 用触发这次工作流的 sha"
+        required: false
+        type: string
+        default: ""
     secrets:
       DEPLOY_HOST:
         required: true
@@ -87,6 +92,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0    # 要 diff 前一个 commit，判定「是不是只改了文档」
+          # ⚠️ inputs.ref 给了就检它 —— 给「先提交再发布」的工作流用
+          #    （用 GITHUB_TOKEN 推的提交**不会触发**别的工作流 ✓ → 只能显式发一次 ✓）
+          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
 
       # ── 判断这次提交要不要发布 ────────────────────────────────────────────
       # 只改文档时不值得跑一遍构建 + 传产物 + 重启容器。
