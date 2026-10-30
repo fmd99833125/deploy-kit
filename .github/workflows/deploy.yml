@@ -77,8 +77,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # ⚠️ packages: read —— 装私有包（@scope/xxx 走 GitHub Packages）要用。
+    #    这里声明的权限**只能比调用方更小**，所以调用方（各项目仓的 deploy.yml）也必须显式给 packages: read ✓。
     permissions:
       contents: read
+      packages: read
     steps:
       # ── 取代码 ────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
@@ -191,10 +194,12 @@ jobs:
         if: steps.check.outputs.should_deploy == 'true'
         working-directory: ${{ inputs.web_dir }}
         # 私有包凭据：装 @scope/私有包（如 @fmd99833125/liquid-glass 走 GitHub Packages）时，
-        # 消费方的 .npmrc 里写 `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`，
-        # token 从各项目仓的 secret NPM_TOKEN 透传进来 —— **没有这个 secret 也不影响**（空值 = 不需要鉴权）。
+        # 消费方的 .npmrc 里写 `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`。
+        # token 用**调用方仓自己的 GITHUB_TOKEN**（生命周期只有这个 job ✓，泄露面最小 ✓）
+        # —— 前提：那个包在 GitHub Packages 里**关联/授权给了调用方这个仓** ✓（包页面 → Manage access ✓）。
+        # 不用长期 PAT，所以各项目仓里不需要任何 secret ✓。
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           case "${{ inputs.package_manager }}" in
